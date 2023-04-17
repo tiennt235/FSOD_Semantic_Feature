@@ -178,3 +178,4 @@ class DatasetMapper:
                 instances.gt_boxes = instances.gt_masks.get_bounding_boxes()
             dataset_dict["instances"] = utils.filter_empty_instances(instances)
         return dataset_dict
+    

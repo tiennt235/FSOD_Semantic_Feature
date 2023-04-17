@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 import os
+import json
 import torch
 import logging
+import itertools
 import tempfile
 import numpy as np
 from functools import lru_cache
@@ -11,9 +13,196 @@ from detectron2.utils import comm
 from detectron2.data import MetadataCatalog
 from detectron2.utils.logger import create_small_table
 from defrcn.evaluation.evaluator import DatasetEvaluator
+from detectron2.structures import BoxMode
+from fvcore.common.file_io import PathManager
 
 
 class PascalVOCDetectionEvaluator(DatasetEvaluator):
+    """
+    Evaluate Pascal VOC AP.
+    It contains a synchronization, therefore has to be called from all ranks.
+
+    Note that this is a rewrite of the official Matlab API.
+    The results should be similar, but not identical to the one produced by
+    the official API.
+    """
+
+    def __init__(self, dataset_name, output_dir=None):
+        """
+        Args:
+            dataset_name (str): name of the dataset, e.g., "voc_2007_test"
+        """
+        self._dataset_name = dataset_name
+        meta = MetadataCatalog.get(dataset_name)
+        self._anno_file_template = os.path.join(meta.dirname, "Annotations", "{}.xml")
+        self._image_set_path = os.path.join(meta.dirname, "ImageSets", "Main", meta.split + ".txt")
+        self._class_names = meta.thing_classes
+        # add this two terms for calculating the mAP of different subset
+        self._base_classes = meta.base_classes
+        self._novel_classes = meta.novel_classes
+        assert meta.year in [2007, 2012], meta.year
+        self._is_2007 = meta.year == 2007
+        self._cpu_device = torch.device("cpu")
+        self._logger = logging.getLogger(__name__)
+        self._output_dir = output_dir
+        self._coco_preditions = []
+        self._coco_results = []
+        
+    def reset(self):
+        self._predictions = defaultdict(list)  # class name -> list of prediction strings
+        self._coco_preditions = []
+        self._coco_results = []
+
+        
+    def process(self, inputs, outputs):
+        for input, output in zip(inputs, outputs):
+            image_id = input["image_id"]
+            instances = output["instances"].to(self._cpu_device)
+            boxes = instances.pred_boxes.tensor.numpy()
+            scores = instances.scores.tolist()
+            classes = instances.pred_classes.tolist()
+            for box, score, cls in zip(boxes, scores, classes):
+                xmin, ymin, xmax, ymax = box
+                # The inverse of data loading logic in `datasets/pascal_voc.py`
+                xmin += 1
+                ymin += 1
+                self._predictions[cls].append(
+                    f"{image_id} {score:.3f} {xmin:.1f} {ymin:.1f} {xmax:.1f} {ymax:.1f}"
+                )
+            
+            instances = output["instances"].to(self._cpu_device)
+            prediction = {"image_id": input["image_id"]}
+            prediction["instances"] = instances_to_coco_json(
+                    instances, input["image_id"])
+            self._coco_preditions.append(prediction)
+            
+    def evaluate(self):
+        """
+        Returns:
+            dict: has a key "segm", whose value is a dict of "AP", "AP50", and "AP75".
+        """
+        all_predictions = comm.gather(self._predictions, dst=0)
+        if not comm.is_main_process():
+            return
+        predictions = defaultdict(list)
+        for predictions_per_rank in all_predictions:
+            for clsid, lines in predictions_per_rank.items():
+                predictions[clsid].extend(lines)
+        del all_predictions
+
+        self._logger.info(
+            "Evaluating {} using {} metric. "
+            "Note that results do not use the official Matlab API.".format(
+                self._dataset_name, 2007 if self._is_2007 else 2012
+            )
+        )
+
+        with tempfile.TemporaryDirectory(prefix="pascal_voc_eval_") as dirname:
+            res_file_template = os.path.join(dirname, "{}.txt")
+
+            aps = defaultdict(list)  # iou -> ap per class
+            aps_base = defaultdict(list)
+            aps_novel = defaultdict(list)
+            exist_base, exist_novel = False, False
+            for cls_id, cls_name in enumerate(self._class_names):
+                lines = predictions.get(cls_id, [""])
+
+                with open(res_file_template.format(cls_name), "w") as f:
+                    f.write("\n".join(lines))
+
+                for thresh in range(50, 100, 5):
+                    rec, prec, ap = voc_eval(
+                        res_file_template,
+                        self._anno_file_template,
+                        self._image_set_path,
+                        cls_name,
+                        ovthresh=thresh / 100.0,
+                        use_07_metric=self._is_2007,
+                    )
+                    aps[thresh].append(ap * 100)
+
+                    if self._base_classes is not None and cls_name in self._base_classes:
+                        aps_base[thresh].append(ap * 100)
+                        exist_base = True
+
+                    if self._novel_classes is not None and cls_name in self._novel_classes:
+                        aps_novel[thresh].append(ap * 100)
+                        exist_novel = True
+
+        ret = OrderedDict()
+        mAP = {iou: np.mean(x) for iou, x in aps.items()}
+        ret["bbox"] = {"AP": np.mean(list(mAP.values())), "AP50": mAP[50], "AP75": mAP[75]}
+
+        # adding evaluation of the base and novel classes
+        if exist_base:
+            mAP_base = {iou: np.mean(x) for iou, x in aps_base.items()}
+            ret["bbox"].update(
+                {"bAP": np.mean(list(mAP_base.values())), "bAP50": mAP_base[50],
+                 "bAP75": mAP_base[75]}
+            )
+
+        if exist_novel:
+            mAP_novel = {iou: np.mean(x) for iou, x in aps_novel.items()}
+            ret["bbox"].update({
+                "nAP": np.mean(list(mAP_novel.values())), "nAP50": mAP_novel[50],
+                "nAP75": mAP_novel[75]
+            })
+
+        # write per class AP to logger
+        per_class_res = {self._class_names[idx]: ap for idx, ap in enumerate(aps[50])}
+
+        self._logger.info("Evaluate per-class mAP50:\n"+create_small_table(per_class_res))
+        self._logger.info("Evaluate overall bbox:\n"+create_small_table(ret["bbox"]))
+        
+        if self._output_dir:
+            PathManager.mkdirs(self._output_dir)
+            file_path = os.path.join(
+                self._output_dir, "instances_predictions.pth")
+            with PathManager.open(file_path, "wb") as f:
+                torch.save(self._coco_preditions, f)
+           
+            self._coco_results = list(
+                itertools.chain(*[x["instances"] for x in self._coco_preditions]))
+            file_path = os.path.join(self._output_dir, "coco_instances_results.json")
+            self._logger.info("Saving results to {}".format(file_path))
+            with PathManager.open(file_path, "w") as f:
+                f.write(json.dumps(self._coco_results))
+                f.flush()
+        return ret
+
+def instances_to_coco_json(instances, img_id):
+    """
+    Dump an "Instances" object to a COCO-format json that's used for evaluation.
+
+    Args:
+        instances (Instances):
+        img_id (int): the image id
+
+    Returns:
+        list[dict]: list of json annotations in COCO format.
+    """
+    num_instance = len(instances)
+    if num_instance == 0:
+        return []
+
+    boxes = instances.pred_boxes.tensor.numpy()
+    boxes = BoxMode.convert(boxes, BoxMode.XYXY_ABS, BoxMode.XYWH_ABS)
+    boxes = boxes.tolist()
+    scores = instances.scores.tolist()
+    classes = instances.pred_classes.tolist()
+
+    results = []
+    for k in range(num_instance):
+        result = {
+            "image_id": img_id,
+            "category_id": classes[k],
+            "bbox": boxes[k],
+            "score": scores[k],
+        }
+        results.append(result)
+    return results
+
+class PascalVOCDetectionEvaluatorOrigin(DatasetEvaluator):
     """
     Evaluate Pascal VOC AP.
     It contains a synchronization, therefore has to be called from all ranks.
@@ -249,7 +438,7 @@ def voc_eval(detpath, annopath, imagesetfile, classname, ovthresh=0.5, use_07_me
     for imagename in imagenames:
         R = [obj for obj in recs[imagename] if obj["name"] == classname]
         bbox = np.array([x["bbox"] for x in R])
-        difficult = np.array([x["difficult"] for x in R]).astype(np.bool)
+        difficult = np.array([x["difficult"] for x in R]).astype(np.bool_)
         # difficult = np.array([False for x in R]).astype(np.bool)  # treat all "difficult" as GT
         det = [False] * len(R)
         npos = npos + sum(~difficult)

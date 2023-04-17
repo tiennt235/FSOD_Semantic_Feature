@@ -11,6 +11,10 @@ from detectron2.layers import batched_nms, cat
 from detectron2.structures import Boxes, Instances
 from detectron2.utils.events import get_event_storage
 
+from defrcn.utils.kdloss import dandr_loss
+from defrcn.data.builtin_meta import PASCAL_VOC_ALL_CATEGORIES, PASCAL_VOC_BASE_CATEGORIES, PASCAL_VOC_NOVEL_CATEGORIES
+
+
 ROI_HEADS_OUTPUT_REGISTRY = Registry("ROI_HEADS_OUTPUT")
 ROI_HEADS_OUTPUT_REGISTRY.__doc__ = """
 Registry for the output layers in ROI heads in a generalized R-CNN model."""
@@ -404,4 +408,3 @@ class FastRCNNOutputLayers(nn.Module):
         scores = self.cls_score(x)
 
         return scores, proposal_deltas
-

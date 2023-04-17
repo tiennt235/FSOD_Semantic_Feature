@@ -4,12 +4,37 @@ from detectron2.engine import launch
 from detectron2.data import MetadataCatalog
 from detectron2.checkpoint import DetectionCheckpointer
 from defrcn.config import get_cfg, set_global_cfg
+from detectron2.config import CfgNode as CN
 from defrcn.evaluation import DatasetEvaluators, verify_results
 from defrcn.engine import DefaultTrainer, default_argument_parser, default_setup
+import torch
 
+
+def add_new_configs(cfg):
+    cfg.MODEL.RPN.ADDITION = False
+    cfg.MODEL.DISTILLATION = CN()
+    cfg.MODEL.DISTILLATION.TEACHER_TRAINING = False
+    cfg.MODEL.DISTILLATION.STUDENT_TRAINING = False
+    cfg.ADDITION = CN()
+    cfg.ADDITION.SEMANTIC_DIM = 300
+
+def batch_size_based_cfg_adjustment(cfg):
+    alpha = 16 // cfg.SOLVER.IMS_PER_BATCH
+    # alpha = 1
+    cfg.defrost()
+    cfg.SOLVER.BASE_LR = cfg.SOLVER.BASE_LR/alpha
+    cfg.SOLVER.STEPS = tuple([int(step*alpha) for step in cfg.SOLVER.STEPS])
+    cfg.SOLVER.MAX_ITER = int(cfg.SOLVER.MAX_ITER*alpha)
+
+def align_iter_student(cfg):
+    alpha = 1
+    cfg.SOLVER.BASE_LR = cfg.SOLVER.BASE_LR/alpha
+    # alpha = 2
+    cfg.SOLVER.STEPS = tuple([int(i/alpha) for i in cfg.SOLVER.STEPS])
+    cfg.SOLVER.MAX_ITER = int(cfg.SOLVER.MAX_ITER/alpha)
+    cfg.SOLVER.WARMUP_ITERS = int(cfg.SOLVER.WARMUP_ITERS/alpha)
 
 class Trainer(DefaultTrainer):
-
     @classmethod
     def build_evaluator(cls, cfg, dataset_name, output_folder=None):
         if output_folder is None:
@@ -18,10 +43,11 @@ class Trainer(DefaultTrainer):
         evaluator_type = MetadataCatalog.get(dataset_name).evaluator_type
         if evaluator_type == "coco":
             from defrcn.evaluation import COCOEvaluator
-            evaluator_list.append(COCOEvaluator(dataset_name, True, output_folder))
+            evaluator_list.append(COCOEvaluator(
+                dataset_name, True, output_folder))
         if evaluator_type == "pascal_voc":
             from defrcn.evaluation import PascalVOCDetectionEvaluator
-            return PascalVOCDetectionEvaluator(dataset_name)
+            return PascalVOCDetectionEvaluator(dataset_name, output_folder)
         if len(evaluator_list) == 0:
             raise NotImplementedError(
                 "no Evaluator for the dataset {} with the type {}".format(
@@ -36,9 +62,13 @@ class Trainer(DefaultTrainer):
 def setup(args):
     cfg = get_cfg()
     cfg.merge_from_file(args.config_file)
+    add_new_configs(cfg)
     if args.opts:
         cfg.merge_from_list(args.opts)
     cfg.freeze()
+    ###
+    batch_size_based_cfg_adjustment(cfg)
+    ###
     set_global_cfg(cfg)
     default_setup(cfg, args)
     return cfg
@@ -56,7 +86,7 @@ def main(args):
         if comm.is_main_process():
             verify_results(cfg, res)
         return res
-
+    
     trainer = Trainer(cfg)
     trainer.resume_or_load(resume=args.resume)
     return trainer.train()

@@ -28,7 +28,8 @@ wheels/
 # vscode editor settings
 .vscode
 
-exp/
+*.zip
+.word_vectors_cache
 checkpoints/
 _DEL_/
 datasets/coco
