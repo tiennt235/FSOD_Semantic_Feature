@@ -128,26 +128,23 @@ class GeneralizedSemanticRCNN(GeneralizedRCNN):
             for m in [self.roi_heads.box_predictor, self.roi_heads.addition]:
                 for p in m.parameters():
                     p.requires_grad = False
-            
+    
+    def inference(self, batched_inputs):
+        assert not self.training
         
-    def _get_class_name(self, cfg):
-        dataset = cfg.DATASETS.TRAIN[0]
-        if 'voc' in dataset:
-            if 'base' in dataset:
-                classes = PASCAL_VOC_BASE_CATEGORIES[int(dataset.split('_')[-1][-1])]
-            if 'novel' in dataset:
-                classes = PASCAL_VOC_NOVEL_CATEGORIES[int(dataset.split('_')[-3][-1])]
-            if 'all' in dataset:
-                classes = PASCAL_VOC_ALL_CATEGORIES[int(dataset.split('_')[-3][-1])]
-        if 'coco' in dataset:
-            ret = _get_coco_fewshot_instances_meta()
-            if 'base' in dataset:
-                classes = ret["base_classes"]
-            if 'novel' in dataset:
-                classes = ret["novel_classes"]
-            if 'all' in dataset:
-                classes = ret["thing_classes"]
-        return classes
+        gt_instances = None
+        if self.teacher_training:
+            gt_instances = [x["instances"].to(self.device) for x in batched_inputs]
+
+        _, _, results, image_sizes = self._forward_once_(batched_inputs, gt_instances)
+        processed_results = []
+        for r, input, image_size in zip(results, batched_inputs, image_sizes):
+            height = input.get("height", image_size[0])
+            width = input.get("width", image_size[1])
+            r = detector_postprocess(r, height, width)
+            processed_results.append({"instances": r})
+        return processed_results
+
 
     def _forward_once_(self, batched_inputs, gt_instances=None):
         
@@ -172,22 +169,7 @@ class GeneralizedSemanticRCNN(GeneralizedRCNN):
 
         return proposal_losses, detector_losses, results, images.image_sizes
     
-    def inference(self, batched_inputs):
-        assert not self.training
-        
-        gt_instances = None
-        if self.teacher_training:
-            gt_instances = [x["instances"].to(self.device) for x in batched_inputs]
-
-        _, _, results, image_sizes = self._forward_once_(batched_inputs, gt_instances)
-        processed_results = []
-        for r, input, image_size in zip(results, batched_inputs, image_sizes):
-            height = input.get("height", image_size[0])
-            width = input.get("width", image_size[1])
-            r = detector_postprocess(r, height, width)
-            processed_results.append({"instances": r})
-        return processed_results
-
+    
     def _expand_bbox(self, gt_box, max_size, stride, expand_rate=1.0):
         x1, y1, x2, y2 = gt_box / stride
         w, h, x_c, y_c = x2 - x1, y2 - y1, (x1 + x2) / 2, (y1 + y2) / 2
@@ -212,9 +194,9 @@ class GeneralizedSemanticRCNN(GeneralizedRCNN):
         features[:,:,:] = self.bg_feature
         for idx, (gt_boxes_per_img, gt_classes_per_img) in enumerate(zip(gt_boxes, gt_classes)):
             for gt_box, gt_class in zip(gt_boxes_per_img, gt_classes_per_img):
-                print((gt_box/stride).int())
+                # print((gt_box/stride).int())
                 x1, y1, x2, y2 = self._expand_bbox(gt_box, max_size, stride, 1.0)
-                print(x1, y1, x2, y2)
+                # print(x1, y1, x2, y2)
                 features[idx, y1:y2, x1:x2] = semantic_features[gt_class]
         
         features = torch.cat((vis_features, features), dim=-1)
@@ -225,5 +207,22 @@ class GeneralizedSemanticRCNN(GeneralizedRCNN):
         
         return features
 
-        
+    def _get_class_name(self, cfg):
+        dataset = cfg.DATASETS.TRAIN[0]
+        if 'voc' in dataset:
+            if 'base' in dataset:
+                classes = PASCAL_VOC_BASE_CATEGORIES[int(dataset.split('_')[-1][-1])]
+            if 'novel' in dataset:
+                classes = PASCAL_VOC_NOVEL_CATEGORIES[int(dataset.split('_')[-3][-1])]
+            if 'all' in dataset:
+                classes = PASCAL_VOC_ALL_CATEGORIES[int(dataset.split('_')[-3][-1])]
+        if 'coco' in dataset:
+            ret = _get_coco_fewshot_instances_meta()
+            if 'base' in dataset:
+                classes = ret["base_classes"]
+            if 'novel' in dataset:
+                classes = ret["novel_classes"]
+            if 'all' in dataset:
+                classes = ret["thing_classes"]
+        return classes    
         

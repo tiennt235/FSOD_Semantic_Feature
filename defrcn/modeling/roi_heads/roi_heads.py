@@ -620,7 +620,7 @@ class SemanticRes5ROIHeads(Res5ROIHeads):
             )
 
             # Set target attributes of the sampled proposals:
-            # proposals_per_image = proposals_per_image[sampled_idxs]
+            proposals_per_image = proposals_per_image[sampled_idxs]
             proposals_per_image.gt_classes = gt_classes
 
             # We index all the attributes of targets that start with "gt_"
@@ -639,6 +639,7 @@ class SemanticRes5ROIHeads(Res5ROIHeads):
                         proposals_per_image.set(
                             trg_name, trg_value[sampled_targets]
                         )
+
             proposals_with_gt.append(proposals_per_image)
 
         return proposals_with_gt

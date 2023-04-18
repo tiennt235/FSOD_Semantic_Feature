@@ -4,6 +4,7 @@ SPLIT_ID=1
 SAVE_DIR=checkpoints/voc/${EXP_NAME}
 IMAGENET_PRETRAIN=ImageNetPretrained/MSRA/R-101.pkl
 IMAGENET_PRETRAIN_TORCH=ImageNetPretrained/torchvision/resnet101-5d3b4d8f.pth
+IMAGENET_PRETRAIN=checkpoints/voc/semantic_rpn_roi_heads_x1.2_bbox/defrcn_det_r101_base1/model_final.pth
 NUM_GPUS=1
 
 
@@ -21,7 +22,6 @@ MODEL.ROI_HEADS.NAME SemanticRes5ROIHeads
 MODEL.DISTILLATION.TEACHER_TRAINING True
 MODEL.DISTILLATION.STUDENT_TRAINING False
 SOLVER.IMS_PER_BATCH 8
-TEST.EVAL_PERIOD 15000
 "
 
 python3 main.py --num-gpus ${NUM_GPUS} --config-file configs/voc/defrcn_det_r101_base${SPLIT_ID}.yaml \
