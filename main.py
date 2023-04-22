@@ -12,14 +12,15 @@ import torch
 
 def add_new_configs(cfg):
     cfg.MODEL.RPN.ADDITION = False
+    cfg.MODEL.RPN.ADDITION_MODEL = None
     cfg.MODEL.DISTILLATION = CN()
     cfg.MODEL.DISTILLATION.TEACHER_TRAINING = False
     cfg.MODEL.DISTILLATION.STUDENT_TRAINING = False
     cfg.ADDITION = CN()
-    cfg.ADDITION.SEMANTIC_DIM = 300
+    cfg.ADDITION.MODEL = None
 
 def batch_size_based_cfg_adjustment(cfg):
-    alpha = 16 // cfg.SOLVER.IMS_PER_BATCH
+    alpha = 16 / cfg.SOLVER.IMS_PER_BATCH
     # alpha = 1
     cfg.defrost()
     cfg.SOLVER.BASE_LR = cfg.SOLVER.BASE_LR/alpha

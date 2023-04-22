@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
-from ..utils.get_semantic_features import get_semantic_features
+from ..utils.class_embedding import get_class_embed
 
 class MLPAdapter(nn.Module):
     def __init__(self, input_size, hidden_size, output_size) -> None:
@@ -31,7 +31,7 @@ class Addition(nn.Module):
         
         self.semantic_adapter = nn.Linear(self.semantic_dim, self.output_size)
         self.sem_vis_adapter = nn.Linear(self.output_size + self.output_size, self.output_size)
-        self.semantic_features = get_semantic_features(self.class_names, model="glove").cuda()
+        self.class_embed = get_class_embed(self.class_names, model="glove").cuda()
         self.bg_feature_init = torch.randn(1, self.semantic_dim)
         self.bg_feature = nn.parameter.Parameter(self.bg_feature_init.clone(), requires_grad=True)
         
@@ -43,9 +43,9 @@ class ConcatAddition(Addition):
         super().__init__(output_size, class_names)
     
     def forward(self, feature_pooled, gt_classes):
-        semantic_features = torch.cat([self.semantic_features, self.bg_feature])
-        semantic_features = self.semantic_adapter(semantic_features)
-        semantic_features = semantic_features[gt_classes]
+        class_embed = torch.cat([self.class_embed, self.bg_feature])
+        class_embed = self.semantic_adapter(class_embed)
+        semantic_features = class_embed[gt_classes]
         
         out = torch.cat((semantic_features, feature_pooled), dim=-1)
         out = self.sem_vis_adapter(out)
