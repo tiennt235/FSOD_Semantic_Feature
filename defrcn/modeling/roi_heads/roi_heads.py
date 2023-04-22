@@ -540,7 +540,7 @@ class SemanticRes5ROIHeads(Res5ROIHeads):
             output_size=self.out_channels
         )
         self.class_names = self._get_class_name(cfg)
-        self.addtion = ConcatAddition(output_size=self.out_channels, class_names=self.class_names)
+        self.addition = ConcatAddition(output_size=self.out_channels, class_names=self.class_names)
         self.student_box_predictor = ROI_HEADS_OUTPUT_REGISTRY.get(self.output_layer)(
             cfg, self.out_channels, self.num_classes, self.cls_agnostic_bbox_reg
         )
@@ -620,7 +620,7 @@ class SemanticRes5ROIHeads(Res5ROIHeads):
             )
 
             # Set target attributes of the sampled proposals:
-            # proposals_per_image = proposals_per_image[sampled_idxs]
+            proposals_per_image = proposals_per_image[sampled_idxs]
             proposals_per_image.gt_classes = gt_classes
 
             # We index all the attributes of targets that start with "gt_"
@@ -639,6 +639,7 @@ class SemanticRes5ROIHeads(Res5ROIHeads):
                         proposals_per_image.set(
                             trg_name, trg_value[sampled_targets]
                         )
+
             proposals_with_gt.append(proposals_per_image)
 
         return proposals_with_gt
@@ -646,7 +647,7 @@ class SemanticRes5ROIHeads(Res5ROIHeads):
         
     def forward_teacher(self, proposals, feature_pooled):
         gt_classes = cat([p.gt_classes for p in proposals], dim=-1)
-        sem_vis_features = self.addtion(feature_pooled, gt_classes) # shape = (batch_size * 512, 2048)
+        sem_vis_features = self.addition(feature_pooled, gt_classes) # shape = (batch_size * 512, 2048)
         
         losses = {}
         
