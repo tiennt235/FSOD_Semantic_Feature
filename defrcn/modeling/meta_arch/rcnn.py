@@ -16,6 +16,7 @@ from defrcn.modeling.roi_heads import build_roi_heads
 from defrcn.data.builtin_meta import PASCAL_VOC_ALL_CATEGORIES, PASCAL_VOC_BASE_CATEGORIES, PASCAL_VOC_NOVEL_CATEGORIES
 from defrcn.data.builtin_meta import _get_coco_fewshot_instances_meta
 from defrcn.utils.class_embedding import get_class_embed
+from defrcn.utils.class_name import get_class_name
 
 __all__ = ["GeneralizedRCNN", "GeneralizedSemanticRCNN"]
 
@@ -115,19 +116,24 @@ class GeneralizedSemanticRCNN(GeneralizedRCNN):
         super().__init__(cfg)
         
         self.addition_model = cfg.MODEL.RPN.ADDITION_MODEL
-        self.visual_dim = self._SHAPE_["res4"].channels
-        if self.addition_model == "glove":
-            self.semantic_dim = 300
-        elif self.addition_model == "clip":
-            self.semantic_dim = 512
-        self.class_names = self._get_class_name(cfg)
         self.num_classes = cfg.MODEL.ROI_HEADS.NUM_CLASSES
-        self.fixed_bg = False
-        self.to_rpn_input_proj = nn.Linear(self.visual_dim + self.semantic_dim, self.visual_dim)
-        self.class_embed = get_class_embed(self.class_names, self.addition_model, include_bg=self.fixed_bg).to(self.device)
-        if not self.fixed_bg:
-            self.bg_feature_init = torch.randn(1, self.semantic_dim)
-            self.bg_feature = nn.parameter.Parameter(self.bg_feature_init.clone(), requires_grad=True)
+        
+        self.visual_dim = self._SHAPE_["res4"].channels
+        
+        if self.addition_model is not None:
+            if self.addition_model == "glove":
+                self.semantic_dim = 300
+            elif self.addition_model == "clip":
+                self.semantic_dim = 512
+    
+            self.fixed_bg = False
+            self.class_names = get_class_name(cfg)
+            self.class_embed = get_class_embed(self.class_names, self.addition_model, include_bg=self.fixed_bg).to(self.device)
+            if not self.fixed_bg:
+                self.bg_feature_init = torch.randn(1, self.semantic_dim)
+                self.bg_feature = nn.parameter.Parameter(self.bg_feature_init.clone(), requires_grad=True)
+            self.to_rpn_input_proj = nn.Linear(self.visual_dim + self.semantic_dim, self.visual_dim)
+        
         self.teacher_training = cfg.MODEL.DISTILLATION.TEACHER_TRAINING
         # if self.teacher_training == False:
         #     for m in [self.roi_heads.box_predictor, self.roi_heads.addition]:
@@ -156,7 +162,7 @@ class GeneralizedSemanticRCNN(GeneralizedRCNN):
         images = self.preprocess_image(batched_inputs)
         features = self.backbone(images.tensor)
         
-        if self.rpn_addition is not None:
+        if self.addition_model is not None:
             features = {k: self._add_semantic_features(features[k], gt_instances, self.class_embed)
                         for k in features}
             
@@ -212,25 +218,6 @@ class GeneralizedSemanticRCNN(GeneralizedRCNN):
         
         return features
 
-    def _get_class_name(self, cfg):
-        dataset = cfg.DATASETS.TRAIN[0]
-        if 'voc' in dataset:
-            if 'base' in dataset:
-                classes = PASCAL_VOC_BASE_CATEGORIES[int(dataset.split('_')[-1][-1])]
-            if 'novel' in dataset:
-                classes = PASCAL_VOC_NOVEL_CATEGORIES[int(dataset.split('_')[-3][-1])]
-            if 'all' in dataset:
-                classes = PASCAL_VOC_ALL_CATEGORIES[int(dataset.split('_')[-3][-1])]
-        if 'coco' in dataset:
-            ret = _get_coco_fewshot_instances_meta()
-            if 'base' in dataset:
-                classes = ret["base_classes"]
-            if 'novel' in dataset:
-                classes = ret["novel_classes"]
-            if 'all' in dataset:
-                classes = ret["thing_classes"]
-        return classes    
-        
         
 @META_ARCH_REGISTRY.register()
 class GeneralizedDistillatedRCNN(GeneralizedSemanticRCNN):
