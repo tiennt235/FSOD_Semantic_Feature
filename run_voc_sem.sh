@@ -48,9 +48,10 @@ python3 tools/model_surgery.py --dataset voc --method remove                    
     --save-dir ${SAVE_DIR}/defrcn_det_r101_base${SPLIT_ID}
 BASE_WEIGHT=${SAVE_DIR}/defrcn_det_r101_base${SPLIT_ID}/model_reset_remove.pth
 
-for seed in 0 1 2 3 4 5 6 7 8 9
+# for seed in 0 1 2 3 4 5 6 7 8 9
+for seed in 2 3 4 5 6 7 8 9
 do
-    for shot in 1 2 3 5 10   # if final, 10 -> 1 2 3 5 10
+    for shot in 1 #2 3 5 10   # if final, 10 -> 1 2 3 5 10
     do
       cfg_MODEL="
       MODEL.ROI_HEADS.NAME SemanticRes5ROIHeads
@@ -67,4 +68,4 @@ do
       #   rm ${OUTPUT_DIR}/model_final.pth
     done
 done
-python3 tools/extract_results.py --res-dir ${SAVE_DIR}/defrcn_gfsod_r101_novel${SPLIT_ID}/ --shot-list 1 2 3 5 10  # surmarize all results
+python3 tools/extract_results.py --res-dir ${SAVE_DIR}/defrcn_gfsod_r101_novel${SPLIT_ID}/ --shot-list 1 #2 3 5 10  # surmarize all results
