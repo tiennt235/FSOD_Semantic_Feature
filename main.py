@@ -11,11 +11,12 @@ import torch
 
 
 def add_new_configs(cfg):
-    cfg.MODEL.RPN.ADDITION = False
     cfg.MODEL.RPN.ADDITION_MODEL = None
     cfg.MODEL.DISTILLATION = CN()
     cfg.MODEL.DISTILLATION.TEACHER_TRAINING = False
     cfg.MODEL.DISTILLATION.STUDENT_TRAINING = False
+    cfg.MODEL.DISTILLATION.MODE = False
+    cfg.MODEL.DISTILLATION.L2 = False
     cfg.ADDITION = CN()
     cfg.ADDITION.MODEL = None
 
