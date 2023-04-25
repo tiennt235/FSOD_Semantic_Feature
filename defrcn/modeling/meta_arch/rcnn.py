@@ -119,10 +119,10 @@ class GeneralizedSemanticRCNN(GeneralizedRCNN):
         self.class_names = self._get_class_name(cfg)
         self.num_classes = cfg.MODEL.ROI_HEADS.NUM_CLASSES
         self.semantic_dim = cfg.ADDITION.SEMANTIC_DIM
-        self.to_rpn_input_proj = nn.Linear(self.features_channels + self.semantic_dim, self.features_channels)
+        self.to_rpn_input_proj = nn.Linear(self.features_channels + self.semantic_dim, self.features_channels).to(self.device)
         self.semantic_features = get_semantic_features(self.class_names, model="glove", semantic_dim=self.semantic_dim).to(self.device)
         self.bg_feature_init = torch.randn(1, self.semantic_dim)
-        self.bg_feature = nn.parameter.Parameter(self.bg_feature_init.clone(), requires_grad=True)
+        self.bg_feature = nn.parameter.Parameter(self.bg_feature_init.clone(), requires_grad=True).to(self.device)
         self.teacher_training = cfg.MODEL.DISTILLATION.TEACHER_TRAINING
         if self.teacher_training == False:
             for m in [self.roi_heads.box_predictor, self.roi_heads.addition]:
@@ -212,10 +212,8 @@ class GeneralizedSemanticRCNN(GeneralizedRCNN):
         features[:,:,:] = self.bg_feature
         for idx, (gt_boxes_per_img, gt_classes_per_img) in enumerate(zip(gt_boxes, gt_classes)):
             for gt_box, gt_class in zip(gt_boxes_per_img, gt_classes_per_img):
-                print((gt_box/stride).int())
-                x1, y1, x2, y2 = self._expand_bbox(gt_box, max_size, stride, 1.0)
-                print(x1, y1, x2, y2)
-                features[idx, y1:y2, x1:x2] = semantic_features[gt_class]
+                x1, y1, x2, y2 = self._expand_bbox(gt_box, max_size, stride, 1.5)
+                features[idx, x1:x2, y1:y2] = semantic_features[gt_class]
         
         features = torch.cat((vis_features, features), dim=-1)
         features = self.to_rpn_input_proj.to(self.device)(features)
