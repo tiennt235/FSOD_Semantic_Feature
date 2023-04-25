@@ -4,7 +4,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from defrcn.utils.class_embedding import get_class_embed
+from defrcn.utils.class_embedding import get_class_embedding
 
 class MLPAdapter(nn.Module):
     def __init__(self, input_size, hidden_size, output_size) -> None:

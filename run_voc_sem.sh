@@ -1,5 +1,5 @@
 # EXP_NAME="semantic_rpn_roi_heads_x1.2_bbox"
-EXP_NAME="attention_dev"
+EXP_NAME="semantic_rpn_x1.5_roi_heads"
 SPLIT_ID=1
 SAVE_DIR=checkpoints/voc/${EXP_NAME}
 IMAGENET_PRETRAIN=ImageNetPretrained/MSRA/R-101.pkl

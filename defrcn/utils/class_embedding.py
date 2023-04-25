@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-def get_class_embed(class_names, model, include_bg=False):
+def get_class_embedding(class_names, model, include_bg=False):
     with torch.no_grad():
         semantic_features = []
         for class_name in class_names:
