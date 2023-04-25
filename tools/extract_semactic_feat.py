@@ -223,7 +223,10 @@ args = parser.parse_args()
 
 class_names = COCO_CATEGORIES if args.dataset == "coco" else VOC_CATEGORIES     
 class_map = COCO_GLOVE_MAP if args.dataset == "coco" else VOC_GLOVE_MAP
-    
+
+class_names.append("background")
+class_map.update({"background": "background"})
+
 if args.model == "clip":
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model, preprocess = clip.load("ViT-B/32", device=device)

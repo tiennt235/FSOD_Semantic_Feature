@@ -17,15 +17,13 @@ from detectron2.structures import Boxes, Instances, pairwise_iou
 from detectron2.modeling.backbone.resnet import BottleneckBlock, make_stage
 from detectron2.modeling.proposal_generator.proposal_utils import add_ground_truth_to_proposals
 
-from defrcn.data.builtin_meta import PASCAL_VOC_ALL_CATEGORIES, PASCAL_VOC_BASE_CATEGORIES, PASCAL_VOC_NOVEL_CATEGORIES
-from defrcn.data.builtin_meta import _get_coco_fewshot_instances_meta
-
 from .box_head import build_box_head
 from .fast_rcnn import ROI_HEADS_OUTPUT_REGISTRY, FastRCNNOutputLayers, FastRCNNOutputs
 
 from ..meta_arch.gdl import decouple_layer, AffineLayer
 
 from ..modules import *
+from defrcn.utils.class_name import get_class_name
 
 ROI_HEADS_REGISTRY = Registry("ROI_HEADS")
 ROI_HEADS_REGISTRY.__doc__ = """
@@ -534,35 +532,35 @@ class SemanticRes5ROIHeads(Res5ROIHeads):
         
         self.teacher_training = cfg.MODEL.DISTILLATION.TEACHER_TRAINING
         self.student_training = cfg.MODEL.DISTILLATION.STUDENT_TRAINING
+        self.distill_mode = cfg.MODEL.DISTILLATION.MODE
+        self.stu_l2 = cfg.MODEL.DISTILLATION.L2
         self.student_adapter = MLPAdapter(
             input_size=self.out_channels,
             hidden_size=self.out_channels // 2,
             output_size=self.out_channels
         )
-        self.class_names = self._get_class_name(cfg)
-        self.addtion = ConcatAddition(output_size=self.out_channels, class_names=self.class_names)
+        self.class_names = get_class_name(cfg)
+        # self.addition = ConcatAddition(
+        #     input_size=self.out_channels, 
+        #     output_size=self.out_channels, 
+        #     class_names=self.class_names
+        #   )
+        self.addition = AttentionAddition(
+            input_size=self.out_channels,
+            output_size=self.out_channels,
+            class_names=self.class_names,
+            )
+
         self.student_box_predictor = ROI_HEADS_OUTPUT_REGISTRY.get(self.output_layer)(
             cfg, self.out_channels, self.num_classes, self.cls_agnostic_bbox_reg
         )
-    def _get_class_name(self, cfg):
-        dataset = cfg.DATASETS.TRAIN[0]
-        if 'voc' in dataset:
-            if 'base' in dataset:
-                classes = PASCAL_VOC_BASE_CATEGORIES[int(dataset.split('_')[-1][-1])]
-            if 'novel' in dataset:
-                classes = PASCAL_VOC_NOVEL_CATEGORIES[int(dataset.split('_')[-3][-1])]
-            if 'all' in dataset:
-                classes = PASCAL_VOC_ALL_CATEGORIES[int(dataset.split('_')[-3][-1])]
-        if 'coco' in dataset:
-            ret = _get_coco_fewshot_instances_meta()
-            if 'base' in dataset:
-                classes = ret["base_classes"]
-            if 'novel' in dataset:
-                classes = ret["novel_classes"]
-            if 'all' in dataset:
-                classes = ret["thing_classes"]
-        return classes
-    
+        self.mlp_adapter = nn.Sequential(
+            nn.Linear(self.out_channels, self.out_channels // 2),
+            nn.ReLU(),
+            nn.Linear(self.out_channels // 2, self.out_channels),
+            nn.ReLU()
+        )
+        
     def _get_gt_proposals(self, matched_idxs, matched_labels, gt_classes):
         """
         Based on the matching between N proposals and M groundtruth,
@@ -639,19 +637,22 @@ class SemanticRes5ROIHeads(Res5ROIHeads):
                         proposals_per_image.set(
                             trg_name, trg_value[sampled_targets]
                         )
+
             proposals_with_gt.append(proposals_per_image)
 
         return proposals_with_gt
     
-        
-    def forward_teacher(self, proposals, feature_pooled):
-        gt_classes = cat([p.gt_classes for p in proposals], dim=-1)
-        sem_vis_features = self.addtion(feature_pooled, gt_classes) # shape = (batch_size * 512, 2048)
-        
+    
+    def forward_teacher(self, feature_pooled, proposals=None):
         losses = {}
+        features = feature_pooled
         
+        gt_classes = cat([p.gt_classes for p in proposals], dim=-1)
+        sem_vis_features = self.addition(feature_pooled, gt_classes)
+        features = sem_vis_features
+            
         pred_class_logits, pred_proposal_deltas = self.box_predictor(
-            sem_vis_features
+            features
         )
         
         outputs = FastRCNNOutputs(
@@ -662,25 +663,20 @@ class SemanticRes5ROIHeads(Res5ROIHeads):
             self.smooth_l1_beta,
         )
         
-        return outputs, losses, sem_vis_features, pred_class_logits
+        return outputs, losses, features, pred_class_logits
     
-    def forward_student(self, proposals, feature_pooled, teacher_sem_vis_features, teacher_pred_class_logits):
-        with torch.no_grad():
-            teacher_features = teacher_sem_vis_features
-            teacher_pred_class_logits = teacher_pred_class_logits
-        
-        adapted_pooled_features = self.student_adapter(feature_pooled)
-        
+    
+    def forward_student(self, proposals, feature_pooled, teacher_features, teacher_pred_class_logits):
         losses = {}
+        
+        adapted_features = self.mlp_adapter(feature_pooled)
+        
         if self.training:
-            l1_loss = nn.SmoothL1Loss(beta=self.smooth_l1_beta)(
-                adapted_pooled_features, 
-                teacher_features
-            )
-            losses.update({"l1_loss": l1_loss})
-            
+            l2_loss = F.mse_loss(adapted_features, teacher_features)
+            losses.update({"loss_kd_mlp": l2_loss})
+             
         pred_class_logits, pred_proposal_deltas = self.student_box_predictor(
-            adapted_pooled_features
+            adapted_features
         )
         
         if self.training:
@@ -688,8 +684,7 @@ class SemanticRes5ROIHeads(Res5ROIHeads):
                 F.log_softmax(pred_class_logits, dim=1), 
                 F.log_softmax(teacher_pred_class_logits, dim=1)
             )
-            losses.update({"kl_loss": kl_loss})
-    
+            losses.update({"loss_kd_att": kl_loss})
             
         outputs = FastRCNNOutputs(
             self.box2box_transform,
@@ -709,7 +704,8 @@ class SemanticRes5ROIHeads(Res5ROIHeads):
         if self.training:
             proposals = self.label_and_sample_proposals(proposals, targets)
         else:
-            proposals = self.label_proposals(proposals, targets)
+            # proposals = self.label_proposals(proposals, targets)
+            pass
         del targets
 
         proposal_boxes = [x.proposal_boxes for x in proposals]
@@ -718,51 +714,61 @@ class SemanticRes5ROIHeads(Res5ROIHeads):
         )
         feature_pooled = box_features.mean(dim=[2, 3])  # pooled to 1x1
         
-        if self.teacher_training or (
-            self.student_training and self.training
-        ):
-            teacher_ouputs, teacher_losses, sem_vis_features, teacher_pred_class_logits = self.forward_teacher(
-                proposals, 
-                feature_pooled
+        # if self.teacher_training or (
+        #     self.student_training and self.training and self.distill_mode
+        # ):
+        #     teacher_ouputs, teacher_losses, teacher_features, teacher_pred_class_logits = self.forward_teacher(
+        #         feature_pooled,
+        #         proposals
+        #     )
+        # if self.student_training:
+        #     student_outputs, student_losses = self.forward_student(
+        #         proposals,
+        #         feature_pooled,
+        #         teacher_features,
+        #         teacher_pred_class_logits
+        #     )
+        if self.training:
+            teacher_ouputs, teacher_losses, teacher_features, teacher_pred_class_logits = self.forward_teacher(
+                feature_pooled,
+                proposals
             )
-        
-        if self.student_training:
             student_outputs, student_losses = self.forward_student(
                 proposals,
                 feature_pooled,
-                sem_vis_features,
+                teacher_features,
                 teacher_pred_class_logits
             )
-        
-        del feature_pooled
-        
-        if self.training:
+            
+            del feature_pooled
             del features
+            
             losses = {}
-            if self.teacher_training:
-                teacher_losses.update(
-                    {f"{key}_t": value for key, value in (teacher_ouputs.losses().items())}
-                )
-                losses.update(teacher_losses)
-            if self.student_training:
-                student_losses.update(
-                    {f"{key}_s": value for key, value in (student_outputs.losses().items())}
-                )
-                losses.update(student_losses)
+            teacher_losses.update(
+                {f"{key}_t": value for key, value in (teacher_ouputs.losses().items())}
+            )
+            losses.update(teacher_losses)
+
+            student_losses.update(
+                {f"{key}_s": value for key, value in (student_outputs.losses().items())}
+            )
+            losses.update(student_losses)
                 
             return [], losses
-        
-        else:
-            if self.teacher_training:
-                pred_instances, _ = teacher_ouputs.inference(
-                    self.test_score_thresh,
-                    self.test_nms_thresh,
-                    self.test_detections_per_img,
-                )
-            if self.student_training:
-                pred_instances, _ = student_outputs.inference(
-                    self.test_score_thresh,
-                    self.test_nms_thresh,
-                    self.test_detections_per_img,
-                )
+        else:  
+            student_outputs, student_losses = self.forward_student(
+                proposals,
+                feature_pooled,
+                None,
+                None,
+            )
+            
+            del feature_pooled
+            del features
+            
+            pred_instances, _ = student_outputs.inference(
+                self.test_score_thresh,
+                self.test_nms_thresh,
+                self.test_detections_per_img,
+            )
             return pred_instances, {}
