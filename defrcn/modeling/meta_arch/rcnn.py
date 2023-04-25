@@ -164,13 +164,13 @@ class GeneralizedSemanticRCNN(GeneralizedRCNN):
         x1, y1, x2, y2 = gt_box / stride
         w, h, x_c, y_c = x2 - x1, y2 - y1, (x1 + x2) / 2, (y1 + y2) / 2
         w, h = w * expand_rate, h * expand_rate
-        x1 = int(max(0, (x_c - w/2) // 1)) # x // 1 = floor(x)
-        y1 = int(max(0, (int(y_c - h/2) // 1))) 
-        x2 = int(min(max_size[1], (x_c + w/2) // 1 + 1)) # x // 1 = ceil(x)
-        y2 = int(min(max_size[0], (y_c + h/2) // 1 + 1))
+        x1 = int(max(0, x_c - w/2))
+        y1 = int(max(0, y_c - h/2))
+        x2 = int(min(max_size[1], x_c + w/2)) 
+        y2 = int(min(max_size[0], y_c + h/2))
         return x1, y1, x2, y2
     
-    def _generate_semantic_features(self, vis_features, gt_instances, stride=16):
+    def _generate_semantic_features(self, vis_features, gt_instances, stride, expand_rate):
         max_size = vis_features.shape[-2:]
         
         gt_boxes = [x.gt_boxes for x in gt_instances]
@@ -183,7 +183,7 @@ class GeneralizedSemanticRCNN(GeneralizedRCNN):
         features[:,:,:] = self.bg_feature
         for idx, (gt_boxes_per_img, gt_classes_per_img) in enumerate(zip(gt_boxes, gt_classes)):
             for gt_box, gt_class in zip(gt_boxes_per_img, gt_classes_per_img):
-                x1, y1, x2, y2 = self._expand_bbox(gt_box, max_size, stride, 1.0)
+                x1, y1, x2, y2 = self._expand_bbox(gt_box, max_size, stride, expand_rate)
                 features[idx, y1:y2, x1:x2] = self.class_embedding[gt_class]
         
         # (B, H, W, channels) -> (B, channels, H, W)
@@ -216,6 +216,17 @@ class GeneralizedDistillatedRCNN(GeneralizedSemanticRCNN):
         losses.update(detector_losses)
         losses.update(proposal_losses)
         return losses
+    
+    def inference(self, batched_inputs):
+        assert not self.training
+        _, _, _, results, image_sizes = self._forward_once_(batched_inputs, None)
+        processed_results = []
+        for r, input, image_size in zip(results, batched_inputs, image_sizes):
+            height = input.get("height", image_size[0])
+            width = input.get("width", image_size[1])
+            r = detector_postprocess(r, height, width)
+            processed_results.append({"instances": r})
+        return processed_results
     
     def _forward_once_(self, batched_inputs, gt_instances=None):
         
@@ -275,16 +286,22 @@ class GeneralizedDistillatedRCNN(GeneralizedSemanticRCNN):
         
         return {"loss_kd": kd_loss}
     
-    def _distillate_multi_scale_features(self, visual_features, gt_instances, stride=16):        
-        loss = 0
+    def _distillate_multi_scale_features(self, visual_features, gt_instances):        
+        losses = {}
         for scale in visual_features:
             stride = self._SHAPE_[scale].stride
+            if scale == 'res2':
+                expand_rate = 2
+            elif scale == 'res3':
+                expand_rate = 1.5
+            else:
+                expand_rate = 1.2                
             semantic_features = self._generate_semantic_features(
-                visual_features[scale], gt_instances, stride
+                visual_features[scale], gt_instances, stride, expand_rate
                 )
             projected_visual_features = self.vis2sem_proj[scale](visual_features[scale])
             
-            loss += F.mse_loss(projected_visual_features, semantic_features)
+            losses.update({f'loss_rpn_{scale}': F.mse_loss(projected_visual_features, semantic_features)})
         
-        return {"loss_rpn_kd": loss}
+        return losses
         
