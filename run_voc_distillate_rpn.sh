@@ -1,4 +1,4 @@
-EXP_NAME="distillate_rpn_res234_expand_defrost"
+EXP_NAME="distillate_rpn_res4_test"
 SPLIT_ID=1
 SAVE_DIR=checkpoints/voc/${EXP_NAME}
 IMAGENET_PRETRAIN=ImageNetPretrained/MSRA/R-101.pkl
