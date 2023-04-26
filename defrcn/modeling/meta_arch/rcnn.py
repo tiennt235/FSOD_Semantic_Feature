@@ -116,7 +116,6 @@ class GeneralizedSemanticRCNN(GeneralizedRCNN):
         self.addition_model = cfg.MODEL.ADDITION.NAME
         self.num_classes = cfg.MODEL.ROI_HEADS.NUM_CLASSES
         self.visual_dim = self._SHAPE_["res4"].channels
-        self.fixed_bg = False
         
         if self.addition_model is not None:
             if self.addition_model == "glove":
@@ -124,19 +123,24 @@ class GeneralizedSemanticRCNN(GeneralizedRCNN):
             elif self.addition_model == "clip":
                 self.semantic_dim = 512
     
+            self.fixed_bg = False
             self.class_names = get_class_name(cfg)
             self.class_embedding = get_class_embedding(
                 self.class_names, 
                 self.addition_model,
                 include_bg=self.fixed_bg 
-                ).to(self.device)
+                )
             if not self.fixed_bg:
                 self.bg_feature_init = torch.randn(1, self.semantic_dim)
                 self.bg_feature = nn.parameter.Parameter(
                     self.bg_feature_init.clone(), 
                     requires_grad=True
-                    ).to(self.device)
-
+                    )
+            
+            self.sem2vis_proj = nn.Conv2d(self.semantic_dim, self.visual_dim, kernel_size=1, bias=False)
+            
+        self.to(self.device)
+        
     def _forward_once_(self, batched_inputs, gt_instances=None):
         
         images = self.preprocess_image(batched_inputs)
@@ -197,12 +201,13 @@ class GeneralizedDistillatedRCNN(GeneralizedSemanticRCNN):
     def __init__(self, cfg):
         super().__init__(cfg)
         
-        self.vis2sem_proj = {}
+        self.vis2sem_proj = nn.ModuleDict()
         for scale in self._SHAPE_:
             self.vis2sem_proj[scale] = nn.Conv2d(
-                self._SHAPE_[scale].channels, self.semantic_dim, kernel_size=1, bias=False
+                self._SHAPE_[scale].channels, self.semantic_dim, kernel_size=1,
                 ).to(self.device)
-            
+        self.to(self.device)
+        
     def forward(self, batched_inputs):
         if not self.training:
             return self.inference(batched_inputs)
@@ -295,13 +300,14 @@ class GeneralizedDistillatedRCNN(GeneralizedSemanticRCNN):
             elif scale == 'res3':
                 expand_rate = 1.5
             else:
-                expand_rate = 1.2                
+                expand_rate = 1.2
             semantic_features = self._generate_semantic_features(
                 visual_features[scale], gt_instances, stride, expand_rate
-                )
+                ).to(self.device)
             projected_visual_features = self.vis2sem_proj[scale](visual_features[scale])
+            # projected_semantic_features = self.sem2vis_proj(semantic_features)
             
+            # losses.update({f'loss_rpn_{scale}': F.mse_loss(visual_features[scale], semantic_features)})
             losses.update({f'loss_rpn_{scale}': F.mse_loss(projected_visual_features, semantic_features)})
         
         return losses
-        
