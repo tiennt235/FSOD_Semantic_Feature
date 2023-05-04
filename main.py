@@ -13,7 +13,11 @@ import torch
 def add_new_configs(cfg):
     cfg.MODEL.ADDITION = CN()
     cfg.MODEL.ADDITION.NAME = None
-
+    cfg.MODEL.ADDITION.INFERENCE_WITH_GT = False
+    cfg.MODEL.ADDITION.TEACHER_TRAINING = False
+    cfg.MODEL.ADDITION.STUDENT_TRAINING = False
+    cfg.MODEL.ADDITION.DISTIL_MODE = False
+    
 def batch_size_based_cfg_adjustment(cfg):
     alpha = 16 / cfg.SOLVER.IMS_PER_BATCH
     # alpha = 1
