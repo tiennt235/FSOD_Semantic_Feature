@@ -530,10 +530,7 @@ class SemanticRes5ROIHeads(Res5ROIHeads):
     def __init__(self, cfg, input_shape):
         super().__init__(cfg, input_shape)
         
-        self.teacher_training = cfg.MODEL.DISTILLATION.TEACHER_TRAINING
-        self.student_training = cfg.MODEL.DISTILLATION.STUDENT_TRAINING
-        self.distill_mode = cfg.MODEL.DISTILLATION.MODE
-        self.stu_l2 = cfg.MODEL.DISTILLATION.L2
+        self.inference_with_gt = cfg.ADDITION.INFERENCE_WITH_GT
         self.student_adapter = MLPAdapter(
             input_size=self.out_channels,
             hidden_size=self.out_channels // 2,
@@ -703,9 +700,9 @@ class SemanticRes5ROIHeads(Res5ROIHeads):
         del images
         if self.training:
             proposals = self.label_and_sample_proposals(proposals, targets)
-        else:
-            # proposals = self.label_proposals(proposals, targets)
-            pass
+        elif self.inference_with_gt:
+            proposals = self.label_proposals(proposals, targets)
+            
         del targets
 
         proposal_boxes = [x.proposal_boxes for x in proposals]
@@ -771,4 +768,238 @@ class SemanticRes5ROIHeads(Res5ROIHeads):
                 self.test_nms_thresh,
                 self.test_detections_per_img,
             )
+            return pred_instances, {}
+        
+@ROI_HEADS_REGISTRY.register()
+class DistillatedRes5ROIHeads(Res5ROIHeads):
+    def __init__(self, cfg, input_shape):
+        super().__init__(cfg, input_shape)
+        
+        self.inference_with_gt = cfg.MODEL.ADDITION.INFERENCE_WITH_GT
+        self.teacher_training = cfg.MODEL.ADDITION.TEACHER_TRAINING
+        self.student_training = cfg.MODEL.ADDITION.STUDENT_TRAINING
+        self.distill_mode = cfg.MODEL.ADDITION.DISTIL_MODE
+
+        self.class_names = get_class_name(cfg)
+        self.addition = ConcatAddition(
+            input_size=self.out_channels, 
+            output_size=self.out_channels, 
+            class_names=self.class_names
+          )
+        # self.addition = AttentionAddition(
+        #     input_size=self.out_channels,
+        #     output_size=self.out_channels,
+        #     class_names=self.class_names,
+        #     )
+        
+        if self.student_training:
+            self.student_box_predictor = ROI_HEADS_OUTPUT_REGISTRY.get(self.output_layer)(
+                cfg, self.out_channels, self.num_classes, self.cls_agnostic_bbox_reg
+            )
+            self.mlp_adapter = nn.Sequential(
+                nn.Linear(self.out_channels, self.out_channels // 2),
+                nn.ReLU(),
+                nn.Linear(self.out_channels // 2, self.out_channels),
+                nn.ReLU()
+            )        
+            
+    def _get_gt_proposals(self, matched_idxs, matched_labels, gt_classes):
+        """
+        Based on the matching between N proposals and M groundtruth,
+        sample the proposals and set their classification labels.
+
+        Args:
+            matched_idxs (Tensor): a vector of length N, each is the best-matched
+                gt index in [0, M) for each proposal.
+            matched_labels (Tensor): a vector of length N, the matcher's label
+                (one of cfg.MODEL.ROI_HEADS.IOU_LABELS) for each proposal.
+            gt_classes (Tensor): a vector of length M.
+
+        Returns:
+            Tensor: a vector of indices of sampled proposals. Each is in [0, N).
+            Tensor: a vector of the same length, the classification label for
+                each sampled proposal. Each sample is labeled as either a category in
+                [0, num_classes) or the background (num_classes).
+        """
+        has_gt = gt_classes.numel() > 0
+        # Get the corresponding GT for each proposal
+        if has_gt:
+            gt_classes = gt_classes[matched_idxs]
+            # Label unmatched proposals (0 label from matcher) as background (label=num_classes)
+            gt_classes[matched_labels == 0] = self.num_classes
+            # Label ignore proposals (-1 label)
+            gt_classes[matched_labels == -1] = -1
+        else:
+            gt_classes = torch.zeros_like(matched_idxs) + self.num_classes
+
+        # sampled_fg_idxs, sampled_bg_idxs = subsample_labels(
+        #     gt_classes,
+        #     self.batch_size_per_image,
+        #     self.positive_sample_fraction,
+        #     self.num_classes,
+        # )
+        positive = nonzero_tuple((gt_classes != -1) & (gt_classes != self.num_classes))[0]
+        negative = nonzero_tuple(gt_classes == self.num_classes)[0]
+        
+        sampled_idxs = torch.cat([positive, negative], dim=0)
+        return sampled_idxs, gt_classes[sampled_idxs]
+
+    @torch.no_grad()
+    def label_proposals(self, proposals, targets):
+        proposals_with_gt = []
+        for proposals_per_image, targets_per_image in zip(proposals, targets):
+            has_gt = len(targets_per_image) > 0
+            match_quality_matrix = pairwise_iou(
+                targets_per_image.gt_boxes, proposals_per_image.proposal_boxes
+            )
+            matched_idxs, matched_labels = self.proposal_matcher(
+                match_quality_matrix
+            )
+            sampled_idxs, gt_classes = self._get_gt_proposals(
+                matched_idxs, matched_labels, targets_per_image.gt_classes
+            )
+
+            # Set target attributes of the sampled proposals:
+            proposals_per_image = proposals_per_image[sampled_idxs]
+            proposals_per_image.gt_classes = gt_classes
+
+            # We index all the attributes of targets that start with "gt_"
+            # and have not been added to proposals yet (="gt_classes").
+            if has_gt:
+                sampled_targets = matched_idxs[sampled_idxs]
+                # NOTE: here the indexing waste some compute, because heads
+                # will filter the proposals again (by foreground/background,
+                # etc), so we essentially index the data twice.
+                for (trg_name,
+                    trg_value,
+                ) in targets_per_image.get_fields().items():
+                    if trg_name.startswith(
+                        "gt_"
+                    ) and not proposals_per_image.has(trg_name):
+                        proposals_per_image.set(
+                            trg_name, trg_value[sampled_targets]
+                        )
+
+            proposals_with_gt.append(proposals_per_image)
+
+        return proposals_with_gt
+    
+    
+    def forward_teacher(self, feature_pooled, proposals=None):
+        losses = {}
+        features = feature_pooled
+        
+        gt_classes = cat([p.gt_classes for p in proposals], dim=-1)
+        sem_vis_features = self.addition(feature_pooled, gt_classes)
+        features = sem_vis_features
+            
+        pred_class_logits, pred_proposal_deltas = self.box_predictor(
+            features
+        )
+        
+        outputs = FastRCNNOutputs(
+            self.box2box_transform,
+            pred_class_logits,
+            pred_proposal_deltas,
+            proposals,
+            self.smooth_l1_beta,
+        )
+        
+        return outputs, losses, features, pred_class_logits
+    
+    
+    def forward_student(self, proposals, feature_pooled, teacher_features, teacher_pred_class_logits):
+        losses = {}
+        
+        adapted_features = self.mlp_adapter(feature_pooled)
+        
+        if self.training:
+            l2_loss = F.mse_loss(adapted_features, teacher_features)
+            losses.update({"loss_kd_mlp": l2_loss})
+             
+        pred_class_logits, pred_proposal_deltas = self.student_box_predictor(
+            adapted_features
+        )
+        
+        if self.training:
+            kl_loss = nn.KLDivLoss(log_target=True)(
+                F.log_softmax(pred_class_logits, dim=1), 
+                F.log_softmax(teacher_pred_class_logits, dim=1)
+            )
+            losses.update({"loss_kd_att": kl_loss})
+            
+        outputs = FastRCNNOutputs(
+            self.box2box_transform,
+            pred_class_logits,
+            pred_proposal_deltas,
+            proposals,
+            self.smooth_l1_beta,
+        )        
+        
+        return outputs, losses
+        
+    def forward(self, images, features, proposals, targets=None):
+        """
+        See :class:`ROIHeads.forward`.
+        """
+        del images
+        if self.training:
+            proposals = self.label_and_sample_proposals(proposals, targets)
+        elif self.inference_with_gt:
+            proposals = self.label_proposals(proposals, targets)
+            
+        del targets
+
+        proposal_boxes = [x.proposal_boxes for x in proposals]
+        box_features = self._shared_roi_transform(
+            [features[f] for f in self.in_features], proposal_boxes
+        )
+        feature_pooled = box_features.mean(dim=[2, 3])  # pooled to 1x1
+        
+        if self.teacher_training or (
+            self.student_training and self.training and self.distill_mode
+        ):
+            teacher_ouputs, teacher_losses, teacher_features, teacher_pred_class_logits = self.forward_teacher(
+                feature_pooled,
+                proposals
+            )
+        if self.student_training:
+            student_outputs, student_losses = self.forward_student(
+                proposals,
+                feature_pooled,
+                teacher_features,
+                teacher_pred_class_logits
+            )
+            
+        del feature_pooled
+        
+        if self.training:
+            del features                
+            
+            losses = {}
+            teacher_losses.update(
+                {f"{key}_t": value for key, value in (teacher_ouputs.losses().items())}
+            )
+            losses.update(teacher_losses)
+
+            if self.student_training:
+                student_losses.update(
+                    {f"{key}_s": value for key, value in (student_outputs.losses().items())}
+                )
+                losses.update(student_losses)
+                
+            return [], losses
+        
+        else:
+            outputs = teacher_ouputs
+            if self.student_training:
+                outputs = student_outputs
+                
+            pred_instances, _ = outputs.inference(
+                self.test_score_thresh,
+                self.test_nms_thresh,
+                self.test_detections_per_img,
+            )
+            
+            
             return pred_instances, {}

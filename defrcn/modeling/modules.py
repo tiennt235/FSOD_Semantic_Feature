@@ -36,7 +36,7 @@ class Addition(nn.Module):
             self.semantic_dim = 512 
         self.visual_dim = output_size
         
-        self.class_embed = get_class_embed(self.class_names, self.embed_model)
+        self.class_embed = get_class_embedding(self.class_names, self.embed_model)
         
         self.bg_embed_init = torch.randn(1, self.semantic_dim)
         self.bg_embed = torch.nn.parameter.Parameter(self.bg_embed_init.clone(), requires_grad=True)
