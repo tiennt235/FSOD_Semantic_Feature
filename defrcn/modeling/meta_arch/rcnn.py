@@ -109,7 +109,7 @@ class GeneralizedRCNN(nn.Module):
     
     
 @META_ARCH_REGISTRY.register()
-class GeneralizedSemanticRCNN(GeneralizedRCNN):
+class SemanticRCNN(GeneralizedRCNN):
     def __init__(self, cfg):
         super().__init__(cfg)
         
@@ -164,40 +164,45 @@ class GeneralizedSemanticRCNN(GeneralizedRCNN):
 
         return proposal_losses, detector_losses, results, images.image_sizes
     
-    def _expand_bbox(self, gt_box, max_size, stride, expand_rate=1.0):
+    def _expand_bbox(self, gt_box, H, W, stride, expand_rate=1.0):
         x1, y1, x2, y2 = gt_box / stride
         w, h, x_c, y_c = x2 - x1, y2 - y1, (x1 + x2) / 2, (y1 + y2) / 2
         w, h = w * expand_rate, h * expand_rate
         x1 = int(max(0, x_c - w/2))
         y1 = int(max(0, y_c - h/2))
-        x2 = int(min(max_size[1], x_c + w/2)) 
-        y2 = int(min(max_size[0], y_c + h/2))
+        x2 = int(min(W, x_c + w/2)) 
+        y2 = int(min(H, y_c + h/2))
         return x1, y1, x2, y2
     
     def _generate_semantic_features(self, vis_features, gt_instances, stride, expand_rate):
-        max_size = vis_features.shape[-2:]
+        B = vis_features.shape[0]
+        H, W = vis_features.shape[-2:]
+        C = self.num_classes
+        D = self.semantic_dim
+        S = stride
         
         gt_boxes = [x.gt_boxes for x in gt_instances]
         gt_classes = [x.gt_classes for x in gt_instances]
         
         features = torch.zeros(
-            (len(gt_instances), max_size[0], max_size[1], self.semantic_dim),
+            (B, H, W, D),
             device=self.device
             )
         features[:,:,:] = self.bg_feature
         for idx, (gt_boxes_per_img, gt_classes_per_img) in enumerate(zip(gt_boxes, gt_classes)):
             for gt_box, gt_class in zip(gt_boxes_per_img, gt_classes_per_img):
-                x1, y1, x2, y2 = self._expand_bbox(gt_box, max_size, stride, expand_rate)
+                x1, y1, x2, y2 = self._expand_bbox(gt_box, H, W, S, expand_rate)
                 features[idx, y1:y2, x1:x2] = self.class_embedding[gt_class]
         
+        # features = features.view(B, H, W, C * D).contiguous()
         # (B, H, W, channels) -> (B, channels, H, W)
-        features = features.permute(0, 3, 1, 2)
+        features = features.permute(0, 3, 1, 2).contiguous()
         
         return features
 
         
 @META_ARCH_REGISTRY.register()
-class GeneralizedDistillatedRCNN(GeneralizedSemanticRCNN):
+class DistillatedRCNN(SemanticRCNN):
     def __init__(self, cfg):
         super().__init__(cfg)
         
@@ -205,7 +210,12 @@ class GeneralizedDistillatedRCNN(GeneralizedSemanticRCNN):
         for scale in self._SHAPE_:
             self.vis2sem_proj[scale] = nn.Conv2d(
                 self._SHAPE_[scale].channels, self.semantic_dim, kernel_size=1,
-                ).to(self.device)
+                )
+        # self.sem2vis_proj = nn.ModuleDict()
+        # for scale in self._SHAPE_:
+        #     self.sem2vis_proj[scale] = nn.Conv2d(
+        #         self.num_classes * self.semantic_dim, self.visual_dim, kernel_size=1,
+        #     )
         self.to(self.device)
         
     def forward(self, batched_inputs):
@@ -296,18 +306,19 @@ class GeneralizedDistillatedRCNN(GeneralizedSemanticRCNN):
         for scale in visual_features:
             stride = self._SHAPE_[scale].stride
             if scale == 'res2':
-                expand_rate = 2
+                expand_rate = 1.0
             elif scale == 'res3':
-                expand_rate = 1.5
+                expand_rate = 1.0
             else:
-                expand_rate = 1.2
+                expand_rate = 1.0
             semantic_features = self._generate_semantic_features(
                 visual_features[scale], gt_instances, stride, expand_rate
                 ).to(self.device)
             projected_visual_features = self.vis2sem_proj[scale](visual_features[scale])
-            # projected_semantic_features = self.sem2vis_proj(semantic_features)
-            
-            # losses.update({f'loss_rpn_{scale}': F.mse_loss(visual_features[scale], semantic_features)})
+            # projected_semantic_features = self.sem2vis_proj[scale](semantic_features)
+    
             losses.update({f'loss_rpn_{scale}': F.mse_loss(projected_visual_features, semantic_features)})
-        
+            # losses.update({f'loss_rpn_{scale}': torch.norm(projected_visual_features - semantic_features, p=2)})
+            # losses.update({f'loss_rpn_{scale}': F.mse_loss(visual_features[scale], projected_semantic_features)})
+            # print(projected_visual_features - semantic_features)
         return losses
