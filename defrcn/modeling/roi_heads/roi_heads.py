@@ -775,11 +775,19 @@ class DistillatedRes5ROIHeads(Res5ROIHeads):
     def __init__(self, cfg, input_shape):
         super().__init__(cfg, input_shape)
         
+<<<<<<< HEAD
         self.inference_with_gt = cfg.ADDITION.INFERENCE_WITH_GT
         self.teacher_training = cfg.MODEL.DISTILLATION.TEACHER_TRAINING
         self.student_training = cfg.MODEL.DISTILLATION.STUDENT_TRAINING
         self.distill_mode = cfg.MODEL.DISTILLATION.MODE
         self.stu_l2 = cfg.MODEL.DISTILLATION.L2
+=======
+        self.inference_with_gt = cfg.MODEL.ADDITION.INFERENCE_WITH_GT
+        self.teacher_training = cfg.MODEL.ADDITION.TEACHER_TRAINING
+        self.student_training = cfg.MODEL.ADDITION.STUDENT_TRAINING
+        self.distill_mode = cfg.MODEL.ADDITION.DISTIL_MODE
+
+>>>>>>> 0fb55d191e71e6684f845be8adca5c9e533c7b72
         self.class_names = get_class_name(cfg)
         self.addition = ConcatAddition(
             input_size=self.out_channels, 
@@ -791,6 +799,7 @@ class DistillatedRes5ROIHeads(Res5ROIHeads):
         #     output_size=self.out_channels,
         #     class_names=self.class_names,
         #     )
+<<<<<<< HEAD
 
         self.student_box_predictor = ROI_HEADS_OUTPUT_REGISTRY.get(self.output_layer)(
             cfg, self.out_channels, self.num_classes, self.cls_agnostic_bbox_reg
@@ -802,6 +811,20 @@ class DistillatedRes5ROIHeads(Res5ROIHeads):
             nn.ReLU()
         )
         
+=======
+        
+        if self.student_training:
+            self.student_box_predictor = ROI_HEADS_OUTPUT_REGISTRY.get(self.output_layer)(
+                cfg, self.out_channels, self.num_classes, self.cls_agnostic_bbox_reg
+            )
+            self.mlp_adapter = nn.Sequential(
+                nn.Linear(self.out_channels, self.out_channels // 2),
+                nn.ReLU(),
+                nn.Linear(self.out_channels // 2, self.out_channels),
+                nn.ReLU()
+            )        
+            
+>>>>>>> 0fb55d191e71e6684f845be8adca5c9e533c7b72
     def _get_gt_proposals(self, matched_idxs, matched_labels, gt_classes):
         """
         Based on the matching between N proposals and M groundtruth,
@@ -970,7 +993,15 @@ class DistillatedRes5ROIHeads(Res5ROIHeads):
                 teacher_pred_class_logits
             )
             
+<<<<<<< HEAD
         if self.training:
+=======
+        del feature_pooled
+        
+        if self.training:
+            del features                
+            
+>>>>>>> 0fb55d191e71e6684f845be8adca5c9e533c7b72
             losses = {}
             teacher_losses.update(
                 {f"{key}_t": value for key, value in (teacher_ouputs.losses().items())}
@@ -983,6 +1014,7 @@ class DistillatedRes5ROIHeads(Res5ROIHeads):
                 )
                 losses.update(student_losses)
                 
+<<<<<<< HEAD
             del feature_pooled
             del features                
             
@@ -996,12 +1028,25 @@ class DistillatedRes5ROIHeads(Res5ROIHeads):
             )
             
             pred_instances, _ = student_outputs.inference(
+=======
+            return [], losses
+        
+        else:
+            outputs = teacher_ouputs
+            if self.student_training:
+                outputs = student_outputs
+                
+            pred_instances, _ = outputs.inference(
+>>>>>>> 0fb55d191e71e6684f845be8adca5c9e533c7b72
                 self.test_score_thresh,
                 self.test_nms_thresh,
                 self.test_detections_per_img,
             )
             
+<<<<<<< HEAD
             del feature_pooled
             del features
+=======
+>>>>>>> 0fb55d191e71e6684f845be8adca5c9e533c7b72
             
             return pred_instances, {}
