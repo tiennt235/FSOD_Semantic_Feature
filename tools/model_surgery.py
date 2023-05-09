@@ -5,7 +5,15 @@ import argparse
 
 def surgery_loop(args, surgery):
 
-    save_name = args.tar_name + '_' + ('remove' if args.method == 'remove' else 'surgery') + '.pth'
+    save_name = args.tar_name
+    if args.method == 'remove':
+        save_name += '_' + 'remove'
+    elif args.method == 'randinit':
+        save_name += 'surgery'
+    else:
+        pass
+    save_name += '.pth'
+    
     save_path = os.path.join(args.save_dir, save_name)
     os.makedirs(args.save_dir, exist_ok=True)
 
@@ -27,6 +35,8 @@ def surgery_loop(args, surgery):
         for idx, (param_name, tar_size) in enumerate(zip(args.param_name, tar_sizes)):
             surgery(param_name, True, tar_size, ckpt)
             surgery(param_name, False, tar_size, ckpt)
+    elif args.method == 'reset':
+        pass
     else:
         raise NotImplementedError
 
@@ -74,7 +84,7 @@ if __name__ == '__main__':
     parser.add_argument('--dataset', type=str, default='coco', choices=['voc', 'coco'])
     parser.add_argument('--src-path', type=str, default='', help='Path to the main checkpoint')
     parser.add_argument('--save-dir', type=str, default='', required=True, help='Save directory')
-    parser.add_argument('--method', choices=['remove', 'randinit'], required=True,
+    parser.add_argument('--method', choices=['remove', 'randinit', 'reset'], required=True,
                         help='remove = remove the final layer of the base detector. '
                              'randinit = randomly initialize novel weights.')
     parser.add_argument('--param-name', type=str, nargs='+', help='Target parameter names',
