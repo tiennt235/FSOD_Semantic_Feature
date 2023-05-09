@@ -12,7 +12,11 @@ from detectron2.structures import Boxes, Instances
 from detectron2.utils.events import get_event_storage
 
 from defrcn.utils.kdloss import dandr_loss
-from defrcn.data.builtin_meta import PASCAL_VOC_ALL_CATEGORIES, PASCAL_VOC_BASE_CATEGORIES, PASCAL_VOC_NOVEL_CATEGORIES
+from defrcn.data.builtin_meta import (
+    PASCAL_VOC_ALL_CATEGORIES,
+    PASCAL_VOC_BASE_CATEGORIES,
+    PASCAL_VOC_NOVEL_CATEGORIES,
+)
 
 
 ROI_HEADS_OUTPUT_REGISTRY = Registry("ROI_HEADS_OUTPUT")
@@ -358,6 +362,157 @@ class FastRCNNOutputs(object):
         )
 
 
+class KDFastRCNNOutputs(FastRCNNOutputs):
+    """
+    A class that stores information about outputs of a Fast R-CNN head.
+    """
+
+    def __init__(
+        self,
+        box2box_transform,
+        pred_class_logits,
+        pred_proposal_deltas,
+        proposals,
+        smooth_l1_beta,
+        teacher_pred_class_logits=None,
+        teacher_pred_proposal_deltas=None,
+        real_pred_class_logits=None,
+        real_pred_proposal_deltas=None,
+    ):
+        """
+        Args:
+            box2box_transform (Box2BoxTransform/Box2BoxTransformRotated):
+                box2box transform instance for proposal-to-detection transformations.
+            pred_class_logits (Tensor): A tensor of shape (R, K + 1) storing the predicted class
+                logits for all R predicted object instances.
+                Each row corresponds to a predicted object instance.
+            pred_proposal_deltas (Tensor): A tensor of shape (R, K * B) or (R, B) for
+                class-specific or class-agnostic regression. It stores the predicted deltas that
+                transform proposals into final box detections.
+                B is the box dimension (4 or 5).
+                When B is 4, each row is [dx, dy, dw, dh (, ....)].
+                When B is 5, each row is [dx, dy, dw, dh, da (, ....)].
+            proposals (list[Instances]): A list of N Instances, where Instances i stores the
+                proposals for image i, in the field "proposal_boxes".
+                When training, each Instances must have ground-truth labels
+                stored in the field "gt_classes" and "gt_boxes".
+            smooth_l1_beta (float): The transition point between L1 and L2 loss in
+                the smooth L1 loss function. When set to 0, the loss becomes L1. When
+                set to +inf, the loss becomes constant 0.
+        """
+        super().__init__(
+            box2box_transform,
+            pred_class_logits,
+            pred_proposal_deltas,
+            proposals,
+            smooth_l1_beta,
+        )
+
+        self.teacher_pred_class_logits = teacher_pred_class_logits
+        self.teacher_pred_proposal_deltas = teacher_pred_proposal_deltas
+        self.real_pred_class_logits = real_pred_class_logits
+        self.real_pred_proposal_deltas = real_pred_proposal_deltas
+
+    def smooth_l1_loss(self, pred_proposal_deltas):
+        """
+        Compute the smooth L1 loss for box regression.
+
+        Returns:
+            scalar Tensor
+        """
+        gt_proposal_deltas = self.box2box_transform.get_deltas(
+            self.proposals.tensor, self.gt_boxes.tensor
+        )
+        box_dim = gt_proposal_deltas.size(1)  # 4 or 5
+        cls_agnostic_bbox_reg = pred_proposal_deltas.size(1) == box_dim
+        device = pred_proposal_deltas.device
+
+        bg_class_ind = self.pred_class_logits.shape[1] - 1
+
+        # Box delta loss is only computed between the prediction for the gt class k
+        # (if 0 <= k < bg_class_ind) and the target; there is no loss defined on predictions
+        # for non-gt classes and background.
+        # Empty fg_inds produces a valid loss of zero as long as the size_average
+        # arg to smooth_l1_loss is False (otherwise it uses torch.mean internally
+        # and would produce a nan loss).
+        fg_inds = torch.nonzero(
+            (self.gt_classes >= 0) & (self.gt_classes < bg_class_ind)
+        ).squeeze(1)
+        if cls_agnostic_bbox_reg:
+            # pred_proposal_deltas only corresponds to foreground class for agnostic
+            gt_class_cols = torch.arange(box_dim, device=device)
+        else:
+            fg_gt_classes = self.gt_classes[fg_inds]
+            # pred_proposal_deltas for class k are located in columns [b * k : b * k + b],
+            # where b is the dimension of box representation (4 or 5)
+            # Note that compared to Detectron1,
+            # we do not perform bounding box regression for background classes.
+            gt_class_cols = box_dim * fg_gt_classes[:, None] + torch.arange(
+                box_dim, device=device
+            )
+
+        loss_box_reg = smooth_l1_loss(
+            pred_proposal_deltas[fg_inds[:, None], gt_class_cols],
+            gt_proposal_deltas[fg_inds],
+            self.smooth_l1_beta,
+            reduction="sum",
+        )
+        # The loss is normalized using the total number of regions (R), not the number
+        # of foreground regions even though the box regression loss is only defined on
+        # foreground regions. Why? Because doing so gives equal training influence to
+        # each foreground example. To see how, consider two different minibatches:
+        #  (1) Contains a single foreground region
+        #  (2) Contains 100 foreground regions
+        # If we normalize by the number of foreground regions, the single example in
+        # minibatch (1) will be given 100 times as much influence as each foreground
+        # example in minibatch (2). Normalizing by the total number of regions, R,
+        # means that the single example in minibatch (1) and each of the 100 examples
+        # in minibatch (2) are given equal influence.
+        loss_box_reg = loss_box_reg / self.gt_classes.numel()
+        return loss_box_reg
+
+    def kd_loss(self, alpha=10, lambd=0.1, kd_temp=5):
+        def kl_loss_w_temp(input, target, temp=1, log_target=False):
+            return (
+                F.kl_div(
+                    F.log_softmax(input / temp),
+                    F.softmax(target / temp),
+                    log_target=log_target,
+                ) 
+                * temp * temp
+            )
+
+        def cross_entropy(input, target, temp=1):
+            return -torch.sum(F.softmax(target / temp) * F.log_softmax(input / temp)) / input.size()[0]
+        
+        hard_loss = kl_loss_w_temp(self.pred_class_logits, self.teacher_pred_class_logits) + \
+                    kl_loss_w_temp(self.real_pred_class_logits, self.teacher_pred_class_logits)
+                    
+        soft_loss = kl_loss_w_temp(self.pred_class_logits, self.teacher_pred_class_logits, kd_temp) + \
+                    kl_loss_w_temp(self.real_pred_class_logits, self.teacher_pred_class_logits, kd_temp)
+        
+        kd_loss = alpha * (lambd * hard_loss + (1 - lambd) * soft_loss)
+        
+        return kd_loss
+
+    def losses(self):
+        """
+        Compute the default losses for box head in Fast(er) R-CNN,
+        with softmax cross entropy loss and smooth L1 loss.
+
+        Returns:
+            A dict of losses (scalar tensors) containing keys "loss_cls" and "loss_box_reg".
+        """
+        self._log_accuracy()
+        return {
+            "loss_cls_tea": F.cross_entropy(self.teacher_pred_class_logits, self.gt_classes),
+            "loss_cls_stu": F.cross_entropy(self.pred_class_logits, self.gt_classes),
+            "loss_box_reg_tea": self.smooth_l1_loss(self.teacher_pred_proposal_deltas),
+            "loss_box_reg_stu": self.smooth_l1_loss(self.pred_proposal_deltas),
+            "loss_kd": self.kd_loss()
+        }
+
+
 @ROI_HEADS_OUTPUT_REGISTRY.register()
 class FastRCNNOutputLayers(nn.Module):
     """
@@ -366,9 +521,7 @@ class FastRCNNOutputLayers(nn.Module):
       (2) classification scores
     """
 
-    def __init__(
-        self, cfg, input_size, num_classes, cls_agnostic_bbox_reg, box_dim=4
-    ):
+    def __init__(self, cfg, input_size, num_classes, cls_agnostic_bbox_reg, box_dim=4):
         """
         Args:
             cfg: config
