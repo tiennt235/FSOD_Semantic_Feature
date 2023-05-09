@@ -16,7 +16,9 @@ def add_new_configs(cfg):
     cfg.MODEL.ADDITION.INFERENCE_WITH_GT = False
     cfg.MODEL.ADDITION.TEACHER_TRAINING = False
     cfg.MODEL.ADDITION.STUDENT_TRAINING = False
-    cfg.MODEL.ADDITION.DISTIL_MODE = False
+    cfg.MODEL.ADDITION.DISTILL_MODE = False
+    cfg.MODEL.ADDITION.KD_TEMP = 1
+    cfg.MODEL.ROI_HEADS.FREEZE_BOX_PREDICTOR = False
     
 def batch_size_based_cfg_adjustment(cfg):
     alpha = 16 / cfg.SOLVER.IMS_PER_BATCH
