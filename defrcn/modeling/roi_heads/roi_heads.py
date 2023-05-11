@@ -767,7 +767,7 @@ class KDRes5ROIHeads(Res5ROIHeads):
         self.inference_with_gt = cfg.MODEL.ADDITION.INFERENCE_WITH_GT
         self.teacher_training = cfg.MODEL.ADDITION.TEACHER_TRAINING
         self.student_training = cfg.MODEL.ADDITION.STUDENT_TRAINING
-        self.distill_mode = cfg.MODEL.ADDITION.DISTILL_MODE
+        self.distill_on = cfg.MODEL.ADDITION.DISTILL_ON
         self.kd_temp = cfg.MODEL.ADDITION.KD_TEMP
 
         self.class_names = get_class_name(cfg)
@@ -1010,7 +1010,8 @@ class KDRes5ROIHeads(Res5ROIHeads):
 class KDFMRes5ROIHeads(KDRes5ROIHeads):
     def __init__(self, cfg, input_shape):
         super().__init__(cfg, input_shape)
-
+        self.kd_temp = cfg.MODEL.ADDITION.KD_TEMP
+        
     def forward(self, images, features, proposals, targets=None, real_features=None):
         """
         See :class:`ROIHeads.forward`.
@@ -1029,30 +1030,34 @@ class KDFMRes5ROIHeads(KDRes5ROIHeads):
         )
         feature_pooled = box_features.mean(dim=[2, 3])  # pooled to 1x1
         
-        pred_class_logits, pred_proposal_deltas = self.student_box_predictor(
+        pred_class_logits, pred_proposal_deltas = self.box_predictor(
             feature_pooled
         )
 
         del feature_pooled
         
-        teacher_pred_class_logits = None
-        teacher_pred_proposal_deltas = None
+        # teacher_pred_class_logits = None
+        # teacher_pred_proposal_deltas = None
         real_pred_class_logits = None
         real_pred_proposal_deltas = None
         
-        if self.distill_mode and self.training:
+        if self.training:
             real_box_features = self._shared_roi_transform(
                 [real_features[f] for f in self.in_features], proposal_boxes
             )
             real_feature_pooled = real_box_features.mean(dim=[2, 3])  # pooled to 1x1
 
-            teacher_pred_class_logits, teacher_pred_proposal_deltas = self.box_predictor(
+            real_pred_class_logits, real_pred_proposal_deltas = self.box_predictor(
                 real_feature_pooled
             )
+            # teacher_pred_class_logits, teacher_pred_proposal_deltas = self.box_predictor(
+            #     real_feature_pooled
+            # )
 
-            real_pred_class_logits, real_pred_proposal_deltas = self.student_box_predictor(
-                real_feature_pooled
-            )
+            # real_pred_class_logits, real_pred_proposal_deltas = self.teacher_box_predictor(
+            #     real_feature_pooled
+            # )
+            
             del real_features
             del real_feature_pooled
         
@@ -1062,8 +1067,7 @@ class KDFMRes5ROIHeads(KDRes5ROIHeads):
             pred_proposal_deltas,
             proposals,
             self.smooth_l1_beta,
-            teacher_pred_class_logits,
-            teacher_pred_proposal_deltas,
+            self.kd_temp,
             real_pred_class_logits,
             real_pred_proposal_deltas,
         )

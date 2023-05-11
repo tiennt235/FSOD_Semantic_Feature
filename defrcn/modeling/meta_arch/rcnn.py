@@ -146,7 +146,7 @@ class KDRCNN(GeneralizedRCNN):
 
         self.teacher_training = cfg.MODEL.ADDITION.TEACHER_TRAINING
         self.student_training = cfg.MODEL.ADDITION.STUDENT_TRAINING
-        self.distill_mode = cfg.MODEL.ADDITION.DISTILL_MODE
+        self.distill_on = cfg.MODEL.ADDITION.DISTILL_ON
 
         if self.addition_model == "glove":
             self.semantic_dim = 300
@@ -167,14 +167,19 @@ class KDRCNN(GeneralizedRCNN):
         self.combined2vis_proj = nn.Conv2d(
             self.semantic_dim + self.visual_dim,
             self.visual_dim,
-            kernel_size=1,
+            kernel_size=4,
+            stride=2,
+            padding=1,
+            bias=False,
         )
 
         self.student_adapter = nn.Sequential(
             nn.ConvTranspose2d(
                 self.visual_dim,
                 self.visual_dim + self.semantic_dim,
-                kernel_size=3,
+                kernel_size=4,
+                stride=2,
+                padding=1,
                 bias=False,
             ),
             nn.BatchNorm2d(self.visual_dim + self.semantic_dim),
@@ -182,20 +187,23 @@ class KDRCNN(GeneralizedRCNN):
             nn.Conv2d(
                 self.visual_dim + self.semantic_dim,
                 self.visual_dim,
-                kernel_size=3,
+                kernel_size=4,
+                stride=2,
+                padding=1,
                 bias=False,
             ),
             nn.Tanh(),
         )
 
         self.discriminator = nn.Sequential(
-            nn.Conv2d(self.visual_dim, self.visual_dim // 2, 3, 2, 1, bias=False),
+            nn.Conv2d(self.visual_dim, self.visual_dim // 2, 4, 2, 1, bias=False),
             nn.BatchNorm2d(self.visual_dim // 2),
             nn.LeakyReLU(0.2, inplace=True),
-        )
-
-        self.discriminator_out_layer = nn.Sequential(
-            nn.Linear(self.visual_dim // 2, 1),
+            nn.Conv2d(self.visual_dim // 2, self.visual_dim // 4, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(self.visual_dim // 4),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(self.visual_dim // 4, 1, 4, 1, 0, bias=False),
+            nn.LeakyReLU(0.2, inplace=True),
             nn.Sigmoid()
         )
         
@@ -258,7 +266,7 @@ class KDRCNN(GeneralizedRCNN):
 
         if self.student_training:
             features = {f: self.student_adapter(features[f]) for f in features}
-            if self.distill_mode and self.training:
+            if self.distill_on and self.training:
                 teacher_features = {
                     f: self._add_semantic_features(features[f], gt_instances)
                     for f in features
@@ -279,7 +287,8 @@ class KDRCNN(GeneralizedRCNN):
                 k: self.affine_rpn(decouple_layer(features[k], scale)) for k in features
             }
         proposals, proposal_losses = self.proposal_generator(
-            images, features_de_rpn, gt_instances
+            images, features_de_rpn, gt_instances, 
+            # real_features
         )
 
         features_de_rcnn = features
@@ -296,9 +305,9 @@ class KDRCNN(GeneralizedRCNN):
         return adv_losses, proposal_losses, detector_losses, results, images.image_sizes
 
     def _forward_discriminator(self, features):
-        features = self.discriminator(features)
-        features = features.permute(0, 2, 3, 1)
-        logits = self.discriminator_out_layer(features)
+        # print("origin", features.shape)
+        logits = self.discriminator(features)
+        # print("logits", logits.shape)
         return logits
     
     def _forward_gan(self, real_features, fake_features):
