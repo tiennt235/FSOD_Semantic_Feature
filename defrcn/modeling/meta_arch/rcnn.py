@@ -146,7 +146,7 @@ class KDRCNN(GeneralizedRCNN):
 
         self.teacher_training = cfg.MODEL.ADDITION.TEACHER_TRAINING
         self.student_training = cfg.MODEL.ADDITION.STUDENT_TRAINING
-        self.distill_mode = cfg.MODEL.ADDITION.DISTILL_MODE
+        self.distill_on = cfg.MODEL.ADDITION.DISTILL_ON
 
         if self.addition_model == "glove":
             self.semantic_dim = 300
@@ -167,14 +167,19 @@ class KDRCNN(GeneralizedRCNN):
         self.combined2vis_proj = nn.Conv2d(
             self.semantic_dim + self.visual_dim,
             self.visual_dim,
-            kernel_size=1,
+            kernel_size=4,
+            stride=2,
+            padding=1,
+            bias=False,
         )
 
         self.student_adapter = nn.Sequential(
             nn.ConvTranspose2d(
                 self.visual_dim,
                 self.visual_dim + self.semantic_dim,
-                kernel_size=3,
+                kernel_size=4,
+                stride=2,
+                padding=1,
                 bias=False,
             ),
             nn.BatchNorm2d(self.visual_dim + self.semantic_dim),
@@ -182,20 +187,23 @@ class KDRCNN(GeneralizedRCNN):
             nn.Conv2d(
                 self.visual_dim + self.semantic_dim,
                 self.visual_dim,
-                kernel_size=3,
+                kernel_size=4,
+                stride=2,
+                padding=1,
                 bias=False,
             ),
             nn.Tanh(),
         )
 
         self.discriminator = nn.Sequential(
-            nn.Conv2d(self.visual_dim, self.visual_dim // 2, 3, 2, 1, bias=False),
+            nn.Conv2d(self.visual_dim, self.visual_dim // 2, 4, 2, 1, bias=False),
             nn.BatchNorm2d(self.visual_dim // 2),
             nn.LeakyReLU(0.2, inplace=True),
-        )
-
-        self.discriminator_out_layer = nn.Sequential(
-            nn.Linear(self.visual_dim // 2, 1),
+            nn.Conv2d(self.visual_dim // 2, self.visual_dim // 4, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(self.visual_dim // 4),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(self.visual_dim // 4, 1, 4, 1, 0, bias=False),
+            nn.LeakyReLU(0.2, inplace=True),
             nn.Sigmoid()
         )
         
@@ -258,7 +266,7 @@ class KDRCNN(GeneralizedRCNN):
 
         if self.student_training:
             features = {f: self.student_adapter(features[f]) for f in features}
-            if self.distill_mode and self.training:
+            if self.distill_on and self.training:
                 teacher_features = {
                     f: self._add_semantic_features(features[f], gt_instances)
                     for f in features
@@ -279,7 +287,8 @@ class KDRCNN(GeneralizedRCNN):
                 k: self.affine_rpn(decouple_layer(features[k], scale)) for k in features
             }
         proposals, proposal_losses = self.proposal_generator(
-            images, features_de_rpn, gt_instances
+            images, features_de_rpn, gt_instances, 
+            # real_features
         )
 
         features_de_rcnn = features
@@ -296,9 +305,9 @@ class KDRCNN(GeneralizedRCNN):
         return adv_losses, proposal_losses, detector_losses, results, images.image_sizes
 
     def _forward_discriminator(self, features):
-        features = self.discriminator(features)
-        features = features.permute(0, 2, 3, 1)
-        logits = self.discriminator_out_layer(features)
+        # print("origin", features.shape)
+        logits = self.discriminator(features)
+        # print("logits", logits.shape)
         return logits
     
     def _forward_gan(self, real_features, fake_features):
@@ -340,18 +349,10 @@ class KDRCNN(GeneralizedRCNN):
             for gt_box, gt_class in zip(gt_boxes_per_img, gt_classes_per_img):
                 x1, y1, x2, y2 = self._expand_bbox(gt_box, H, W, stride, expand_rate)
                 features[idx, y1:y2, x1:x2] = self.class_embedding[gt_class]
-<<<<<<< HEAD
-        
-        # features = features.view(B, H, W, C * D).contiguous()
-        # (B, H, W, channels) -> (B, channels, H, W)
-        features = features.permute(0, 3, 1, 2).contiguous()
-        
-=======
 
         # (B, H, W, channels) -> (B, channels, H, W)
         features = features.permute(0, 3, 1, 2)
 
->>>>>>> 5e1e3bfc390c296f47b4f1e453b6500df344aa31
         return features
 
     def _add_semantic_features(self, visual_features, gt_instances):
@@ -367,78 +368,6 @@ class KDRCNN(GeneralizedRCNN):
         # (B, 1324, H, W) -> (B, 1024, H, W)
         combined_features = self.combined2vis_proj(combined_features)
         return combined_features
-<<<<<<< HEAD
-        
-        
-@META_ARCH_REGISTRY.register()
-class DistillatedRCNN(SemanticRCNN):
-    def __init__(self, cfg):
-        super().__init__(cfg)
-        
-        self.vis2sem_proj = nn.ModuleDict()
-        for scale in self._SHAPE_:
-            # if scale == "res4":
-            #     continue
-            self.vis2sem_proj[scale] = nn.Conv2d(
-                self._SHAPE_[scale].channels, self.semantic_dim, kernel_size=1,
-                )
-        # self.sem2vis_proj = nn.ModuleDict()
-        # for scale in self._SHAPE_:
-        #     self.sem2vis_proj[scale] = nn.Conv2d(
-        #         self.num_classes * self.semantic_dim, self.visual_dim, kernel_size=1,
-        #     )
-        self.to(self.device)
-        
-    def forward(self, batched_inputs):
-        if not self.training:
-            return self.inference(batched_inputs)
-        assert "instances" in batched_inputs[0]
-        gt_instances = [x["instances"].to(self.device) for x in batched_inputs]
-        kd_loss, proposal_losses, detector_losses, _, _ = self._forward_once_(
-            batched_inputs, gt_instances
-            )
-        losses = {}
-        losses.update(kd_loss)
-        losses.update(detector_losses)
-        losses.update(proposal_losses)
-        return losses
-    
-    def inference(self, batched_inputs):
-        assert not self.training
-        _, _, _, results, image_sizes = self._forward_once_(batched_inputs, None)
-        processed_results = []
-        for r, input, image_size in zip(results, batched_inputs, image_sizes):
-            height = input.get("height", image_size[0])
-            width = input.get("width", image_size[1])
-            r = detector_postprocess(r, height, width)
-            processed_results.append({"instances": r})
-        return processed_results
-    
-    def _forward_once_(self, batched_inputs, gt_instances=None):
-        
-        images = self.preprocess_image(batched_inputs)
-        multi_scale_features = self.backbone(images.tensor)
-
-        kd_loss = {}
-        if self.training:
-            kd_loss = self._distillate_multi_scale_features(multi_scale_features, gt_instances)
-            
-        features = {'res4': multi_scale_features['res4']}
-        del multi_scale_features
-        
-        features_de_rpn = features
-        if self.cfg.MODEL.RPN.ENABLE_DECOUPLE:
-            scale = self.cfg.MODEL.RPN.BACKWARD_SCALE
-            features_de_rpn = {k: self.affine_rpn(decouple_layer(features[k], scale)) for k in features}
-        proposals, proposal_losses = self.proposal_generator(images, features_de_rpn, gt_instances)
-
-        features_de_rcnn = features
-        if self.cfg.MODEL.ROI_HEADS.ENABLE_DECOUPLE:
-            scale = self.cfg.MODEL.ROI_HEADS.BACKWARD_SCALE
-            features_de_rcnn = {k: self.affine_rcnn(decouple_layer(features[k], scale)) for k in features}
-        results, detector_losses = self.roi_heads(images, features_de_rcnn, proposals, gt_instances)
-=======
->>>>>>> 5e1e3bfc390c296f47b4f1e453b6500df344aa31
 
     def _distillate_multi_scale_features(self, visual_features, gt_instances):
         losses = {}
@@ -456,13 +385,6 @@ class DistillatedRCNN(SemanticRCNN):
                 B, H, W, gt_instances, stride, expand_rate
             )
             projected_visual_features = self.vis2sem_proj[scale](visual_features[scale])
-<<<<<<< HEAD
-            
-            losses.update({f'loss_rpn_{scale}': F.mse_loss(projected_visual_features, semantic_features)})
-            # losses.update({f'loss_rpn_{scale}': torch.norm(projected_visual_features - semantic_features, p=2)})
-            # losses.update({f'loss_rpn_{scale}': F.mse_loss(visual_features[scale], projected_semantic_features)})
-            # print(projected_visual_features - semantic_features)
-=======
 
             losses.update(
                 {
@@ -472,5 +394,4 @@ class DistillatedRCNN(SemanticRCNN):
                 }
             )
 
->>>>>>> 5e1e3bfc390c296f47b4f1e453b6500df344aa31
         return losses

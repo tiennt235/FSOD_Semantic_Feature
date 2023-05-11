@@ -81,3 +81,14 @@ def cat_mask(t, mask1, mask2):
     rt = torch.cat([t1, t2], dim=1)
     return rt
 
+def kl_loss(input, target, temp=1):
+    return F.kl_div(
+        F.log_softmax(input / temp), 
+        F.softmax(target / temp),
+        ) * temp * temp
+    
+def binary_kl_loss(input, target, temp=1):
+    return F.kl_div(
+        F.sigmoid(input / temp), 
+        F.sigmoid(target / temp),
+        ) * temp * temp
