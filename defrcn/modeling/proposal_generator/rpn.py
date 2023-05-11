@@ -502,3 +502,110 @@ class RPN(nn.Module):
             # Append feature map proposals with shape (N, Hi*Wi*A, B)
             proposals.append(proposals_i.view(N, -1, B))
         return proposals
+
+
+@PROPOSAL_GENERATOR_REGISTRY.register()
+class KDRPN(RPN):
+    def __init__(self, cfg, input_shape) -> None:
+        super().__init__(cfg, input_shape)
+        
+        self.teacher_training = cfg.MODEL.ADDITION.TEACHER_TRAINING
+        self.student_training = cfg.MODEL.ADDITION.STUDENT_TRAINING
+        self.distill_on = cfg.MODEL.ADDITION.DISTILL_ON
+        
+    def forward(
+        self,
+        images: ImageList,
+        features: Dict[str, torch.Tensor],
+        gt_instances: Optional[List[Instances]] = None,
+        real_features: Optional[Dict[str, torch.Tensor]] = None,
+    ):
+        """
+        Args:
+            images (ImageList): input images of length `N`
+            features (dict[str, Tensor]): input data as a mapping from feature
+                map name to tensor. Axis 0 represents the number of images `N` in
+                the input data; axes 1-3 are channels, height, and width, which may
+                vary between feature maps (e.g., if a feature pyramid is used).
+            gt_instances (list[Instances], optional): a length `N` list of `Instances`s.
+                Each `Instances` stores ground-truth instances for the corresponding image.
+
+        Returns:
+            proposals: list[Instances]: contains fields "proposal_boxes", "objectness_logits"
+            loss: dict[Tensor] or None
+        """
+        features = [features[f] for f in self.in_features]
+        anchors = self.anchor_generator(features)
+
+        pred_objectness_logits, pred_anchor_deltas = self.rpn_head(features)
+
+        # Transpose the Hi*Wi*A dimension to the middle:
+        pred_objectness_logits = [
+            # (N, A, Hi, Wi) -> (N, Hi, Wi, A) -> (N, Hi*Wi*A)
+            score.permute(0, 2, 3, 1).flatten(1)
+            for score in pred_objectness_logits
+        ]
+        pred_anchor_deltas = [
+            # (N, A*B, Hi, Wi) -> (N, A, B, Hi, Wi) -> (N, Hi, Wi, A, B) -> (N, Hi*Wi*A, B)
+            x.view(
+                x.shape[0], -1, self.anchor_generator.box_dim, x.shape[-2], x.shape[-1]
+            )
+            .permute(0, 3, 4, 1, 2)
+            .flatten(1, -2)
+            for x in pred_anchor_deltas
+        ]
+
+
+        if self.training:
+            assert gt_instances is not None, "RPN requires gt_instances in training!"
+            gt_labels, gt_boxes = self.label_and_sample_anchors(anchors, gt_instances)
+            losses = self.losses(
+                anchors, pred_objectness_logits, gt_labels, pred_anchor_deltas, gt_boxes
+            )
+            
+            if self.distill_on:
+                real_features = [real_features[f] for f in self.in_features]
+                real_anchors = self.anchor_generator(real_features)
+                
+                real_pred_objectness_logits, real_pred_anchor_deltas = self.rpn_head(
+                    real_features
+                )
+                real_pred_objectness_logits = [
+                    # (N, A, Hi, Wi) -> (N, Hi, Wi, A) -> (N, Hi*Wi*A)
+                    score.permute(0, 2, 3, 1).flatten(1)
+                    for score in real_pred_objectness_logits
+                ]
+                real_pred_anchor_deltas = [
+                    # (N, A*B, Hi, Wi) -> (N, A, B, Hi, Wi) -> (N, Hi, Wi, A, B) -> (N, Hi*Wi*A, B)
+                    x.view(
+                        x.shape[0], -1, self.anchor_generator.box_dim, x.shape[-2], x.shape[-1]
+                    )
+                    .permute(0, 3, 4, 1, 2)
+                    .flatten(1, -2)
+                    for x in real_pred_anchor_deltas
+                ]
+            
+                if self.teacher_training:
+                    real_losses = self.losses(
+                        real_anchors,
+                        real_pred_objectness_logits,
+                        gt_labels,
+                        real_pred_anchor_deltas,
+                        gt_boxes,
+                    )
+                    losses.update(
+                        {f"{loss_name}_tea": loss for loss_name, loss in real_losses.items()}
+                    )
+                    
+                kd_loss = F.binary_cross_entropy_with_logits(
+                    cat(pred_objectness_logits, dim=1), F.sigmoid(cat(real_pred_objectness_logits, dim=1))
+                )
+                losses.update({"loss_rpn_cls_kd": kd_loss})
+            
+        else:
+            losses = {}
+
+        proposals = self.predict_proposals(
+            anchors, pred_objectness_logits, pred_anchor_deltas, images.image_sizes
+        )
+        return proposals, losses

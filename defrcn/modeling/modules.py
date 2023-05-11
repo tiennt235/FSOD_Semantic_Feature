@@ -210,3 +210,37 @@ class SingleSiameseAttention(nn.Module):
 
         return output
         
+class Discriminator(nn.Module):
+    def __init__(self, visual_dim) -> None:
+        super().__init__()
+
+        self.visual_dim = visual_dim
+        self.model = nn.Sequential(
+            nn.Conv2d(self.visual_dim, self.visual_dim // 2, 3, 2, 1, bias=False),
+            nn.BatchNorm2d(self.visual_dim // 2),
+            nn.LeakyReLU(0.2, inplace=True),
+        )
+        self.fc = nn.Linear(self.visual_dim // 2, 1)
+        
+        # self._init_weight(self.model)
+        
+    def _init_weight(self, module):
+        if (
+            isinstance(module, nn.Conv2d)
+            or isinstance(module, nn.ConvTranspose2d)
+            or isinstance(module, nn.Linear)
+        ):            
+            # nn.init.normal_(module.weight, mean=0, std=0.002)
+            nn.init.kaiming_uniform_(
+                module.weight,
+                nonlinearity='relu'
+            )
+            
+    def forward(self, x):
+        out = self.model(x)
+        # print("before view", out.shape)
+        out = out.view(out.shape[0], -1, self.visual_dim // 2)
+        # print(out.shape)
+        out = self.fc(out)
+        out = F.sigmoid(out)
+        return out

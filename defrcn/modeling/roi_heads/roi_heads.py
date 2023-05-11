@@ -767,7 +767,7 @@ class KDRes5ROIHeads(Res5ROIHeads):
         self.inference_with_gt = cfg.MODEL.ADDITION.INFERENCE_WITH_GT
         self.teacher_training = cfg.MODEL.ADDITION.TEACHER_TRAINING
         self.student_training = cfg.MODEL.ADDITION.STUDENT_TRAINING
-        self.distill_mode = cfg.MODEL.ADDITION.DISTILL_MODE
+        self.distill_on = cfg.MODEL.ADDITION.DISTILL_ON
         self.kd_temp = cfg.MODEL.ADDITION.KD_TEMP
 
         self.class_names = get_class_name(cfg)
@@ -951,7 +951,7 @@ class KDRes5ROIHeads(Res5ROIHeads):
         teacher_features = None
         teacher_pred_class_logits = None
         if self.teacher_training or (
-            self.student_training and self.training and self.distill_mode
+            self.student_training and self.training and self.distill_on
         ):
             (
                 teacher_ouputs,
@@ -1035,37 +1035,41 @@ class KDFMRes5ROIHeads(KDRes5ROIHeads):
 
         del feature_pooled
         
-        teacher_pred_class_logits = None
-        teacher_pred_proposal_deltas = None
         real_pred_class_logits = None
         real_pred_proposal_deltas = None
+        teacher_pred_class_logits = None
+        teacher_pred_proposal_deltas = None
         
-        if self.distill_mode and self.training:
-            real_box_features = self._shared_roi_transform(
-                [real_features[f] for f in self.in_features], proposal_boxes
-            )
-            real_feature_pooled = real_box_features.mean(dim=[2, 3])  # pooled to 1x1
+        if self.training:
+            if self.distill_on:
+                real_box_features = self._shared_roi_transform(
+                    [real_features[f] for f in self.in_features], proposal_boxes
+                )
+                real_feature_pooled = real_box_features.mean(dim=[2, 3])  # pooled to 1x1
 
-            teacher_pred_class_logits, teacher_pred_proposal_deltas = self.box_predictor(
-                real_feature_pooled
-            )
-
-            real_pred_class_logits, real_pred_proposal_deltas = self.student_box_predictor(
-                real_feature_pooled
-            )
-            del real_features
-            del real_feature_pooled
+                real_pred_class_logits, real_pred_proposal_deltas = self.student_box_predictor(
+                    real_feature_pooled
+                )
+                
+                # teacher_pred_class_logits, teacher_pred_proposal_deltas = self.box_predictor(
+                #     real_feature_pooled
+                # )
+                
+                del real_features
+                del real_feature_pooled
         
         outputs = KDFastRCNNOutputs(
             self.box2box_transform,
             pred_class_logits,
             pred_proposal_deltas,
             proposals,
+            self.kd_temp,
             self.smooth_l1_beta,
-            teacher_pred_class_logits,
-            teacher_pred_proposal_deltas,
             real_pred_class_logits,
             real_pred_proposal_deltas,
+            teacher_pred_class_logits,
+            teacher_pred_proposal_deltas,
+            self.teacher_training
         )
 
 

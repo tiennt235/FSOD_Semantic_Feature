@@ -11,7 +11,7 @@ from detectron2.layers import batched_nms, cat
 from detectron2.structures import Boxes, Instances
 from detectron2.utils.events import get_event_storage
 
-from defrcn.utils.kdloss import dandr_loss
+from defrcn.utils.kdloss import kl_loss
 from defrcn.data.builtin_meta import (
     PASCAL_VOC_ALL_CATEGORIES,
     PASCAL_VOC_BASE_CATEGORIES,
@@ -374,10 +374,12 @@ class KDFastRCNNOutputs(FastRCNNOutputs):
         pred_proposal_deltas,
         proposals,
         smooth_l1_beta,
-        teacher_pred_class_logits=None,
-        teacher_pred_proposal_deltas=None,
+        kd_temp,
         real_pred_class_logits=None,
         real_pred_proposal_deltas=None,
+        teacher_pred_class_logits=None,
+        teacher_pred_proposal_deltas=None,
+        teacher_training=False,
     ):
         """
         Args:
@@ -408,10 +410,12 @@ class KDFastRCNNOutputs(FastRCNNOutputs):
             smooth_l1_beta,
         )
 
-        self.teacher_pred_class_logits = teacher_pred_class_logits
-        self.teacher_pred_proposal_deltas = teacher_pred_proposal_deltas
+        self.kd_temp = kd_temp
         self.real_pred_class_logits = real_pred_class_logits
         self.real_pred_proposal_deltas = real_pred_proposal_deltas
+        self.teacher_pred_class_logits = teacher_pred_class_logits
+        self.teacher_pred_proposal_deltas = teacher_pred_proposal_deltas
+        self.teacher_training = teacher_training
 
     def smooth_l1_loss(self, pred_proposal_deltas):
         """
@@ -471,27 +475,16 @@ class KDFastRCNNOutputs(FastRCNNOutputs):
         loss_box_reg = loss_box_reg / self.gt_classes.numel()
         return loss_box_reg
 
-    def kd_loss(self, alpha=10, lambd=0.1, kd_temp=5):
-        def kl_loss_w_temp(input, target, temp=1, log_target=False):
-            return (
-                F.kl_div(
-                    F.log_softmax(input / temp),
-                    F.softmax(target / temp),
-                    log_target=log_target,
-                ) 
-                * temp * temp
-            )
-
-        def cross_entropy(input, target, temp=1):
-            return -torch.sum(F.softmax(target / temp) * F.log_softmax(input / temp)) / input.size()[0]
-        
-        hard_loss = kl_loss_w_temp(self.pred_class_logits, self.teacher_pred_class_logits) + \
-                    kl_loss_w_temp(self.real_pred_class_logits, self.teacher_pred_class_logits)
+    def kd_loss(self, input, target, lambd=0.1, kd_temp=5):
+        hard_loss = kl_loss(self.pred_class_logits, self.teacher_pred_class_logits) + \
+                    kl_loss(self.real_pred_class_logits, self.teacher_pred_class_logits)
                     
-        soft_loss = kl_loss_w_temp(self.pred_class_logits, self.teacher_pred_class_logits, kd_temp) + \
-                    kl_loss_w_temp(self.real_pred_class_logits, self.teacher_pred_class_logits, kd_temp)
+        soft_loss = kl_loss(self.pred_class_logits, self.teacher_pred_class_logits, kd_temp) + \
+                    kl_loss(self.real_pred_class_logits, self.teacher_pred_class_logits, kd_temp)
         
-        kd_loss = alpha * (lambd * hard_loss + (1 - lambd) * soft_loss)
+        print("hard_loss", hard_loss)
+        print("soft_loss", soft_loss)
+        kd_loss = lambd * hard_loss + (1 - lambd) * soft_loss
         
         return kd_loss
 
@@ -504,13 +497,19 @@ class KDFastRCNNOutputs(FastRCNNOutputs):
             A dict of losses (scalar tensors) containing keys "loss_cls" and "loss_box_reg".
         """
         self._log_accuracy()
-        return {
-            "loss_cls_tea": F.cross_entropy(self.teacher_pred_class_logits, self.gt_classes),
-            "loss_cls_stu": F.cross_entropy(self.pred_class_logits, self.gt_classes),
-            "loss_box_reg_tea": self.smooth_l1_loss(self.teacher_pred_proposal_deltas),
-            "loss_box_reg_stu": self.smooth_l1_loss(self.pred_proposal_deltas),
-            "loss_kd": self.kd_loss()
+        print("class logits", torch.sum(self.pred_class_logits), torch.sum(self.real_pred_class_logits))
+        print("kl_loss", kl_loss(self.pred_class_logits, self.real_pred_class_logits, self.kd_temp))
+        losses = {
+            "loss_cls": F.cross_entropy(self.pred_class_logits, self.gt_classes),
+            "loss_box_reg": self.smooth_l1_loss(self.pred_proposal_deltas),
+            "loss_cls_kd": kl_loss(self.pred_class_logits, self.real_pred_class_logits, self.kd_temp)
         }
+        if self.teacher_training:
+            losses.update({
+                "loss_cls_tea": F.cross_entropy(self.teacher_pred_class_logits, self.gt_classes),
+                "loss_box_reg_tea": self.smooth_l1_loss(self.teacher_pred_proposal_deltas),
+            })
+        return losses
 
 
 @ROI_HEADS_OUTPUT_REGISTRY.register()

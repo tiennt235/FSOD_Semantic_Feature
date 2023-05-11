@@ -15,6 +15,8 @@ from .build import META_ARCH_REGISTRY
 from .gdl import decouple_layer, AffineLayer
 
 from defrcn.modeling.roi_heads import build_roi_heads
+from defrcn.modeling.modules import Discriminator
+
 from defrcn.utils.class_embedding import get_class_embedding
 from defrcn.utils.class_name import get_class_name
 
@@ -146,7 +148,7 @@ class KDRCNN(GeneralizedRCNN):
 
         self.teacher_training = cfg.MODEL.ADDITION.TEACHER_TRAINING
         self.student_training = cfg.MODEL.ADDITION.STUDENT_TRAINING
-        self.distill_mode = cfg.MODEL.ADDITION.DISTILL_MODE
+        self.distill_on = cfg.MODEL.ADDITION.DISTILL_ON
 
         if self.addition_model == "glove":
             self.semantic_dim = 300
@@ -167,14 +169,20 @@ class KDRCNN(GeneralizedRCNN):
         self.combined2vis_proj = nn.Conv2d(
             self.semantic_dim + self.visual_dim,
             self.visual_dim,
-            kernel_size=1,
+            kernel_size=4,
+            stride=2,
+            padding=1,
+            bias=False,
         )
+        # self.combined2vis_proj.apply(self._init_weight)
 
         self.student_adapter = nn.Sequential(
             nn.ConvTranspose2d(
                 self.visual_dim,
                 self.visual_dim + self.semantic_dim,
-                kernel_size=3,
+                kernel_size=4,
+                stride=2,
+                padding=1,
                 bias=False,
             ),
             nn.BatchNorm2d(self.visual_dim + self.semantic_dim),
@@ -182,23 +190,29 @@ class KDRCNN(GeneralizedRCNN):
             nn.Conv2d(
                 self.visual_dim + self.semantic_dim,
                 self.visual_dim,
-                kernel_size=3,
+                kernel_size=4,
+                stride=2,
+                padding=1,
                 bias=False,
             ),
             nn.Tanh(),
         )
+        # self.student_adapter.apply(self._init_weight)
 
+        # self.discriminator = Discriminator(self.visual_dim)
         self.discriminator = nn.Sequential(
-            nn.Conv2d(self.visual_dim, self.visual_dim // 2, 3, 2, 1, bias=False),
+            nn.Conv2d(self.visual_dim, self.visual_dim // 2, 4, 2, 1, bias=False),
             nn.BatchNorm2d(self.visual_dim // 2),
             nn.LeakyReLU(0.2, inplace=True),
-        )
-
-        self.discriminator_out_layer = nn.Sequential(
-            nn.Linear(self.visual_dim // 2, 1),
+            nn.Conv2d(self.visual_dim // 2, self.visual_dim // 4, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(self.visual_dim // 4),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(self.visual_dim // 4, 1, 4, 1, 0, bias=False),
+            nn.LeakyReLU(0.2, inplace=True),
             nn.Sigmoid()
         )
-        
+        # self.discriminator.apply(self._init_weight)
+
         if len(self._SHAPE_) > 1:
             self.vis2sem_proj = nn.ModuleDict()
             for scale in self._SHAPE_:
@@ -209,8 +223,21 @@ class KDRCNN(GeneralizedRCNN):
                     self.semantic_dim,
                     kernel_size=1,
                 )
-
+        
         self.to(self.device)
+
+    def _init_weight(self, module):
+        if (
+            isinstance(module, nn.Conv2d)
+            or isinstance(module, nn.ConvTranspose2d)
+            or isinstance(module, nn.Linear)
+        ):
+            # nn.init.normal_(module.weight, mean=0, std=0.002)
+            print("init", module.__class__.__name__)
+            nn.init.kaiming_uniform_(
+                module.weight,
+                nonlinearity='relu'
+            )
 
     def forward(self, batched_inputs):
         if not self.training:
@@ -258,7 +285,7 @@ class KDRCNN(GeneralizedRCNN):
 
         if self.student_training:
             features = {f: self.student_adapter(features[f]) for f in features}
-            if self.distill_mode and self.training:
+            if self.distill_on and self.training:
                 teacher_features = {
                     f: self._add_semantic_features(features[f], gt_instances)
                     for f in features
@@ -293,18 +320,27 @@ class KDRCNN(GeneralizedRCNN):
             images, features_de_rcnn, proposals, gt_instances, real_features
         )
 
+        # adv_losses, detector_losses = self._merge_losses(adv_losses, detector_losses)
         return adv_losses, proposal_losses, detector_losses, results, images.image_sizes
 
-    def _forward_discriminator(self, features):
-        features = self.discriminator(features)
-        features = features.permute(0, 2, 3, 1)
-        logits = self.discriminator_out_layer(features)
-        return logits
-    
+    def _merge_losses(self, adv_losses, detector_losses, alpha=10):
+        loss_kd = detector_losses.pop("loss_kd")
+        adv_losses.update({"loss_adv_g": adv_losses["loss_adv_g"] + alpha * loss_kd})
+
+        return adv_losses, detector_losses
+
+    # def _forward_discriminator(self, features):
+    #     features = self.discriminator(features)
+    #     features = features.permute(0, 2, 3, 1).contiguous()
+    #     logits = self.discriminator_out_layer(features)
+    #     return logits
+
     def _forward_gan(self, real_features, fake_features):
-        logit_real = self._forward_discriminator(real_features)
-        logit_fake = self._forward_discriminator(fake_features)
-        
+        # logit_real = self._forward_discriminator(real_features)
+        # logit_fake = self._forward_discriminator(fake_features)
+        logit_real = self.discriminator(real_features)
+        logit_fake = self.discriminator(fake_features)
+
         gen_loss = F.mse_loss(fake_features, torch.ones_like(fake_features))
         disc_loss_real = F.mse_loss(logit_real, torch.ones_like(logit_real))
         disc_loss_fake = F.mse_loss(logit_fake, torch.zeros_like(logit_fake))
