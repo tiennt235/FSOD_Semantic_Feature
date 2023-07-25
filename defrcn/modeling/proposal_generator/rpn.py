@@ -508,11 +508,7 @@ class RPN(nn.Module):
 class KDRPN(RPN):
     def __init__(self, cfg, input_shape) -> None:
         super().__init__(cfg, input_shape)
-        
-        self.teacher_training = cfg.MODEL.ADDITION.TEACHER_TRAINING
-        self.student_training = cfg.MODEL.ADDITION.STUDENT_TRAINING
-        self.distill_on = cfg.MODEL.ADDITION.DISTILL_ON
-        
+                
     def forward(
         self,
         images: ImageList,
@@ -563,44 +559,30 @@ class KDRPN(RPN):
                 anchors, pred_objectness_logits, gt_labels, pred_anchor_deltas, gt_boxes
             )
             
-            if self.distill_on:
-                real_features = [real_features[f] for f in self.in_features]
-                real_anchors = self.anchor_generator(real_features)
-                
-                real_pred_objectness_logits, real_pred_anchor_deltas = self.rpn_head(
-                    real_features
-                )
-                real_pred_objectness_logits = [
-                    # (N, A, Hi, Wi) -> (N, Hi, Wi, A) -> (N, Hi*Wi*A)
-                    score.permute(0, 2, 3, 1).flatten(1)
-                    for score in real_pred_objectness_logits
-                ]
-                real_pred_anchor_deltas = [
-                    # (N, A*B, Hi, Wi) -> (N, A, B, Hi, Wi) -> (N, Hi, Wi, A, B) -> (N, Hi*Wi*A, B)
-                    x.view(
-                        x.shape[0], -1, self.anchor_generator.box_dim, x.shape[-2], x.shape[-1]
-                    )
-                    .permute(0, 3, 4, 1, 2)
-                    .flatten(1, -2)
-                    for x in real_pred_anchor_deltas
-                ]
+            real_features = [real_features]
             
-                if self.teacher_training:
-                    real_losses = self.losses(
-                        real_anchors,
-                        real_pred_objectness_logits,
-                        gt_labels,
-                        real_pred_anchor_deltas,
-                        gt_boxes,
-                    )
-                    losses.update(
-                        {f"{loss_name}_tea": loss for loss_name, loss in real_losses.items()}
-                    )
-                    
-                kd_loss = F.binary_cross_entropy_with_logits(
-                    cat(pred_objectness_logits, dim=1), F.sigmoid(cat(real_pred_objectness_logits, dim=1))
+            real_pred_objectness_logits, real_pred_anchor_deltas = self.rpn_head(
+                real_features
+            )
+            real_pred_objectness_logits = [
+                # (N, A, Hi, Wi) -> (N, Hi, Wi, A) -> (N, Hi*Wi*A)
+                score.permute(0, 2, 3, 1).flatten(1)
+                for score in real_pred_objectness_logits
+            ]
+            real_pred_anchor_deltas = [
+                # (N, A*B, Hi, Wi) -> (N, A, B, Hi, Wi) -> (N, Hi, Wi, A, B) -> (N, Hi*Wi*A, B)
+                x.view(
+                    x.shape[0], -1, self.anchor_generator.box_dim, x.shape[-2], x.shape[-1]
                 )
-                losses.update({"loss_rpn_cls_kd": kd_loss})
+                .permute(0, 3, 4, 1, 2)
+                .flatten(1, -2)
+                for x in real_pred_anchor_deltas
+            ]
+                
+            kd_loss = F.kl_div(
+                F.log_softmax(cat(pred_objectness_logits, dim=1)), F.log_softmax(cat(real_pred_objectness_logits, dim=1)), log_target=True
+            )
+            losses.update({"loss_rpn_cls_kd": kd_loss})
             
         else:
             losses = {}

@@ -9,7 +9,7 @@ def surgery_loop(args, surgery):
     if args.method == 'remove':
         save_name += '_' + 'remove'
     elif args.method == 'randinit':
-        save_name += 'surgery'
+        save_name += '_' + 'surgery'
     else:
         pass
     save_name += '.pth'

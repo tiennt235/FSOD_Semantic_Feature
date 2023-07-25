@@ -151,6 +151,7 @@ class DatasetMapper:
 
         if "annotations" in dataset_dict:
             # USER: Modify this if you want to keep them for some reason.
+            dataset_dict['fs_class'] = list(set([anno["category_id"] for anno in dataset_dict["annotations"]]))
             for anno in dataset_dict["annotations"]:
                 if not self.use_instance_mask:
                     anno.pop("segmentation", None)

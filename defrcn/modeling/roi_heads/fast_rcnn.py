@@ -1,5 +1,6 @@
 """Implement the CosineSimOutputLayers and  FastRCNNOutputLayers with FC layers."""
 
+import copy
 import torch
 import logging
 import numpy as np
@@ -361,7 +362,136 @@ class FastRCNNOutputs(object):
             topk_per_image,
         )
 
+class DCFastRCNNOutputs(FastRCNNOutputs):
+    """
+    A class that stores information about outputs of a Fast R-CNN head.
+    """
 
+    def __init__(
+        self,
+        box2box_transform,
+        pred_class_logits,
+        pred_proposal_deltas,
+        proposals,
+        smooth_l1_beta,
+        fs_class,
+    ):
+        """
+        Args:
+            box2box_transform (Box2BoxTransform/Box2BoxTransformRotated):
+                box2box transform instance for proposal-to-detection transformations.
+            pred_class_logits (Tensor): A tensor of shape (R, K + 1) storing the predicted class
+                logits for all R predicted object instances.
+                Each row corresponds to a predicted object instance.
+            pred_proposal_deltas (Tensor): A tensor of shape (R, K * B) or (R, B) for
+                class-specific or class-agnostic regression. It stores the predicted deltas that
+                transform proposals into final box detections.
+                B is the box dimension (4 or 5).
+                When B is 4, each row is [dx, dy, dw, dh (, ....)].
+                When B is 5, each row is [dx, dy, dw, dh, da (, ....)].
+            proposals (list[Instances]): A list of N Instances, where Instances i stores the
+                proposals for image i, in the field "proposal_boxes".
+                When training, each Instances must have ground-truth labels
+                stored in the field "gt_classes" and "gt_boxes".
+            smooth_l1_beta (float): The transition point between L1 and L2 loss in
+                the smooth L1 loss function. When set to 0, the loss becomes L1. When
+                set to +inf, the loss becomes constant 0.
+        """
+        super().__init__(
+            box2box_transform,
+            pred_class_logits,
+            pred_proposal_deltas,
+            proposals,
+            smooth_l1_beta,
+        )
+        self.fs_class = fs_class
+        
+    def dc_loss(self):
+        """
+        Compute the decoupling classification loss for box classification. 
+        The implementation functions of dc_loss and dc_loss_v1 are exactly the same, but the code of the dc_loss is more concise. 
+
+        Returns:
+            scalar Tensor
+        """
+        self._log_accuracy()
+        # bg_class_ind = self.pred_class_logits.shape[1] - 1
+
+
+        # fg_class = self.gt_classes != bg_class_ind
+        # bg_class = self.gt_classes == bg_class_ind
+        # num_instances = self.pred_class_logits.shape[0]
+        # num_classes = self.pred_class_logits.shape[1]
+
+        # knonw_class_mask = torch.zeros(num_instances, num_classes).to(self.gt_classes.device)
+        # knonw_class_mask[fg_class,:] = 1
+        # for i in range(int(num_instances/512)):
+        #     start_ind = i*512
+        #     end_ind = 511 + i*512
+            
+        #     known_class_ind = copy.deepcopy(self.fs_class[i])
+        #     known_class_ind.append(bg_class_ind)
+            
+        #     tmp = knonw_class_mask[start_ind:end_ind+1, known_class_ind]
+        #     tmp[bg_class[start_ind:end_ind+1],:] = 1
+
+        #     knonw_class_mask[start_ind:end_ind+1, known_class_ind] = tmp
+
+
+        # pred_logits = self.pred_class_logits * knonw_class_mask
+        # loss = F.cross_entropy(pred_logits, self.gt_classes, reduction="mean")
+
+        # return loss 
+    
+        loss = 0
+        bg_label = self.pred_class_logits.shape[1]-1
+        num_instances = self.pred_class_logits.shape[0]
+        num_classes = self.pred_class_logits.shape[1]
+
+        for i in range(int(num_instances/512)):
+            start_ind = i*512
+            end_ind = 511 + i*512
+            x = self.pred_class_logits[start_ind:end_ind+1,:]
+            y = self.gt_classes[start_ind:end_ind+1]
+            m = torch.zeros(1, num_classes).to(self.gt_classes.device)
+            m[0,-1] = 1
+            m[0, self.fs_class[i]] = 1
+            N = x.shape[0]
+
+            # positive head
+            pos_ind = y!=bg_label
+            pos_logit= x[pos_ind,:]
+            pos_score = F.softmax(pos_logit, dim=1) # Eq. 4
+            pos_loss = F.nll_loss(pos_score.log(), y[pos_ind], reduction="sum") #Eq. 5
+
+            # negative head
+            neg_ind = y==bg_label
+            neg_logit = x[neg_ind,:]
+            print(m)
+            print(y[neg_ind].shape)
+            print(m.expand_as(neg_logit).shape)
+            neg_score = F.softmax(m.expand_as(neg_logit)*neg_logit, dim=1) #Eq. 8
+            print(neg_score)
+            neg_loss = F.nll_loss(neg_score.log(), y[neg_ind], reduction="sum")  #Eq. 9
+
+            # total loss
+            loss += (pos_loss + neg_loss)/N #Eq. 6
+
+        return loss/(num_instances/512)
+    
+    def losses(self):
+        """
+        Compute the default losses for box head in Fast(er) R-CNN,
+        with softmax cross entropy loss and smooth L1 loss.
+
+        Returns:
+            A dict of losses (scalar tensors) containing keys "loss_cls" and "loss_box_reg".
+        """
+        return {
+            "loss_cls": self.dc_loss(),
+            "loss_box_reg": self.smooth_l1_loss(),
+        }
+        
 class KDFastRCNNOutputs(FastRCNNOutputs):
     """
     A class that stores information about outputs of a Fast R-CNN head.
@@ -497,8 +627,6 @@ class KDFastRCNNOutputs(FastRCNNOutputs):
             A dict of losses (scalar tensors) containing keys "loss_cls" and "loss_box_reg".
         """
         self._log_accuracy()
-        print("class logits", torch.sum(self.pred_class_logits), torch.sum(self.real_pred_class_logits))
-        print("kl_loss", kl_loss(self.pred_class_logits, self.real_pred_class_logits, self.kd_temp))
         losses = {
             "loss_cls": F.cross_entropy(self.pred_class_logits, self.gt_classes),
             "loss_box_reg": self.smooth_l1_loss(self.pred_proposal_deltas),

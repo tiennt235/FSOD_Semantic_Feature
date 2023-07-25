@@ -24,6 +24,7 @@ from .fast_rcnn import (
     ROI_HEADS_OUTPUT_REGISTRY,
     FastRCNNOutputLayers,
     FastRCNNOutputs,
+    DCFastRCNNOutputs,
     KDFastRCNNOutputs,
 )
 
@@ -1007,10 +1008,15 @@ class KDRes5ROIHeads(Res5ROIHeads):
 
 
 @ROI_HEADS_REGISTRY.register()
-class KDFMRes5ROIHeads(KDRes5ROIHeads):
+class KDFMRes5ROIHeads(Res5ROIHeads):
     def __init__(self, cfg, input_shape):
         super().__init__(cfg, input_shape)
 
+        self.teacher_training = cfg.MODEL.ADDITION.TEACHER_TRAINING
+        self.student_training = cfg.MODEL.ADDITION.STUDENT_TRAINING
+        self.distill_on = cfg.MODEL.ADDITION.DISTILL_ON
+        self.kd_temp = cfg.MODEL.ADDITION.KD_TEMP
+            
     def forward(self, images, features, proposals, targets=None, real_features=None):
         """
         See :class:`ROIHeads.forward`.
@@ -1018,8 +1024,8 @@ class KDFMRes5ROIHeads(KDRes5ROIHeads):
         del images
         if self.training:
             proposals = self.label_and_sample_proposals(proposals, targets)
-        elif self.inference_with_gt:
-            proposals = self.label_proposals(proposals, targets)
+        # elif self.inference_with_gt:
+        #     proposals = self.label_proposals(proposals, targets)
 
         del targets
 
@@ -1029,7 +1035,7 @@ class KDFMRes5ROIHeads(KDRes5ROIHeads):
         )
         feature_pooled = box_features.mean(dim=[2, 3])  # pooled to 1x1
         
-        pred_class_logits, pred_proposal_deltas = self.student_box_predictor(
+        pred_class_logits, pred_proposal_deltas = self.box_predictor(
             feature_pooled
         )
 
@@ -1047,7 +1053,7 @@ class KDFMRes5ROIHeads(KDRes5ROIHeads):
                 )
                 real_feature_pooled = real_box_features.mean(dim=[2, 3])  # pooled to 1x1
 
-                real_pred_class_logits, real_pred_proposal_deltas = self.student_box_predictor(
+                real_pred_class_logits, real_pred_proposal_deltas = self.box_predictor(
                     real_feature_pooled
                 )
                 
@@ -1063,8 +1069,8 @@ class KDFMRes5ROIHeads(KDRes5ROIHeads):
             pred_class_logits,
             pred_proposal_deltas,
             proposals,
-            self.kd_temp,
             self.smooth_l1_beta,
+            self.kd_temp,
             real_pred_class_logits,
             real_pred_proposal_deltas,
             teacher_pred_class_logits,
@@ -1085,4 +1091,52 @@ class KDFMRes5ROIHeads(KDRes5ROIHeads):
                 self.test_detections_per_img,
             )
 
+            return pred_instances, {}
+
+
+@ROI_HEADS_REGISTRY.register()
+class DCRes5ROIHeads(Res5ROIHeads):
+    def __init__(self, cfg, input_shape):
+        super().__init__(cfg, input_shape)
+
+    def forward(self, images, features, proposals, targets=None, fs_class=None):
+        """
+        See :class:`ROIHeads.forward`.
+        """
+        del images
+
+        if self.training:
+            proposals = self.label_and_sample_proposals(proposals, targets)
+        del targets
+
+        proposal_boxes = [x.proposal_boxes for x in proposals]
+        box_features = self._shared_roi_transform(
+            [features[f] for f in self.in_features], proposal_boxes
+        )
+        feature_pooled = box_features.mean(dim=[2, 3])  # pooled to 1x1
+        pred_class_logits, pred_proposal_deltas = self.box_predictor(
+            feature_pooled
+        )
+        del feature_pooled
+
+        outputs = DCFastRCNNOutputs(
+            self.box2box_transform,
+            pred_class_logits,
+            pred_proposal_deltas,
+            proposals,
+            self.smooth_l1_beta,
+            fs_class
+        )
+
+        if self.training:
+            del features
+            losses = outputs.losses()
+            return [], losses
+        else:
+            pred_instances, _ = outputs.inference(
+                self.test_score_thresh,
+                self.test_nms_thresh,
+                self.test_detections_per_img,
+            )
+            # pred_instances = self.forward_with_given_boxes(features, pred_instances)
             return pred_instances, {}
