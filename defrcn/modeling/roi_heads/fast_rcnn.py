@@ -507,9 +507,14 @@ class KDFastRCNNOutputs(FastRCNNOutputs):
         kd_temp,
         real_pred_class_logits=None,
         real_pred_proposal_deltas=None,
+<<<<<<< HEAD
         teacher_pred_class_logits=None,
         teacher_pred_proposal_deltas=None,
         teacher_training=False,
+=======
+        # teacher_pred_class_logits=None,
+        # teacher_pred_proposal_deltas=None,
+>>>>>>> f39460a156536f65f659a3ff33ff8db22da8ad31
     ):
         """
         Args:
@@ -539,6 +544,7 @@ class KDFastRCNNOutputs(FastRCNNOutputs):
             proposals,
             smooth_l1_beta,
         )
+<<<<<<< HEAD
 
         self.kd_temp = kd_temp
         self.real_pred_class_logits = real_pred_class_logits
@@ -546,6 +552,14 @@ class KDFastRCNNOutputs(FastRCNNOutputs):
         self.teacher_pred_class_logits = teacher_pred_class_logits
         self.teacher_pred_proposal_deltas = teacher_pred_proposal_deltas
         self.teacher_training = teacher_training
+=======
+        
+        self.kd_temp = kd_temp
+        self.real_pred_class_logits = real_pred_class_logits
+        self.real_pred_proposal_deltas = real_pred_proposal_deltas
+        # self.teacher_pred_class_logits = teacher_pred_class_logits
+        # self.teacher_pred_proposal_deltas = teacher_pred_proposal_deltas
+>>>>>>> f39460a156536f65f659a3ff33ff8db22da8ad31
 
     def smooth_l1_loss(self, pred_proposal_deltas):
         """
@@ -605,7 +619,11 @@ class KDFastRCNNOutputs(FastRCNNOutputs):
         loss_box_reg = loss_box_reg / self.gt_classes.numel()
         return loss_box_reg
 
+<<<<<<< HEAD
     def kd_loss(self, input, target, lambd=0.1, kd_temp=5):
+=======
+    def kd_loss(self, alpha=10, lambd=0.1, kd_temp=5):      
+>>>>>>> f39460a156536f65f659a3ff33ff8db22da8ad31
         hard_loss = kl_loss(self.pred_class_logits, self.teacher_pred_class_logits) + \
                     kl_loss(self.real_pred_class_logits, self.teacher_pred_class_logits)
                     
@@ -617,7 +635,8 @@ class KDFastRCNNOutputs(FastRCNNOutputs):
         kd_loss = lambd * hard_loss + (1 - lambd) * soft_loss
         
         return kd_loss
-
+    
+            
     def losses(self):
         """
         Compute the default losses for box head in Fast(er) R-CNN,
@@ -627,8 +646,17 @@ class KDFastRCNNOutputs(FastRCNNOutputs):
             A dict of losses (scalar tensors) containing keys "loss_cls" and "loss_box_reg".
         """
         self._log_accuracy()
+<<<<<<< HEAD
         losses = {
             "loss_cls": F.cross_entropy(self.pred_class_logits, self.gt_classes),
+=======
+        print("sum class logits", torch.sum(self.pred_class_logits), torch.sum(self.real_pred_class_logits))
+        print(kl_loss(self.pred_class_logits, self.real_pred_class_logits, self.kd_temp))
+        return {
+            # "loss_cls_tea": F.cross_entropy(self.real_pred_class_logits, self.gt_classes),
+            "loss_cls": F.cross_entropy(self.pred_class_logits, self.gt_classes),
+            # "loss_box_reg_tea": self.smooth_l1_loss(self.real_pred_proposal_deltas),
+>>>>>>> f39460a156536f65f659a3ff33ff8db22da8ad31
             "loss_box_reg": self.smooth_l1_loss(self.pred_proposal_deltas),
             "loss_cls_kd": kl_loss(self.pred_class_logits, self.real_pred_class_logits, self.kd_temp)
         }

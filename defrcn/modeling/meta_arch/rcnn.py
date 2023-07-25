@@ -144,8 +144,19 @@ class KDRCNN(GeneralizedRCNN):
                 p.requires_grad = False
             print("froze roi_box_predictor parameters")
 
+<<<<<<< HEAD
         self.addition_model = cfg.MODEL.AUX.NAME
         self.inference_with_gt = cfg.MODEL.AUX.INFERENCE_WITH_GT
+=======
+        self.addition_model = cfg.MODEL.ADDITION.NAME
+        self.inference_with_gt = cfg.MODEL.ADDITION.INFERENCE_WITH_GT
+        self.num_classes = cfg.MODEL.ROI_HEADS.NUM_CLASSES
+        self.visual_dim = self._SHAPE_["res4"].channels
+
+        self.teacher_training = cfg.MODEL.ADDITION.TEACHER_TRAINING
+        self.student_training = cfg.MODEL.ADDITION.STUDENT_TRAINING
+        self.distill_on = cfg.MODEL.ADDITION.DISTILL_ON
+>>>>>>> f39460a156536f65f659a3ff33ff8db22da8ad31
 
         if self.addition_model == "glove":
             self.semantic_dim = 300
@@ -199,6 +210,7 @@ class KDRCNN(GeneralizedRCNN):
                 nn.ReLU(inplace=True),
             )
 
+<<<<<<< HEAD
         self.to(self.device)
 
     def forward(self, batched_inputs):
@@ -208,6 +220,15 @@ class KDRCNN(GeneralizedRCNN):
         gt_instances = [x["instances"].to(self.device) for x in batched_inputs]
         kd_loss, proposal_losses, detector_losses, _, _ = self._forward_once_(
             batched_inputs, gt_instances
+=======
+        self.combined2vis_proj = nn.Conv2d(
+            self.semantic_dim + self.visual_dim,
+            self.visual_dim,
+            kernel_size=4,
+            stride=2,
+            padding=1,
+            bias=False,
+>>>>>>> f39460a156536f65f659a3ff33ff8db22da8ad31
         )
         losses = {}
         losses.update(kd_loss)
@@ -223,8 +244,31 @@ class KDRCNN(GeneralizedRCNN):
             assert "instances" in batched_inputs[0]
             gt_instances = [x["instances"].to(self.device) for x in batched_inputs]
 
+<<<<<<< HEAD
         _, _, _, results, image_sizes = self._forward_once_(
             batched_inputs, gt_instances
+=======
+        self.student_adapter = nn.Sequential(
+            nn.ConvTranspose2d(
+                self.visual_dim,
+                self.visual_dim + self.semantic_dim,
+                kernel_size=4,
+                stride=2,
+                padding=1,
+                bias=False,
+            ),
+            nn.BatchNorm2d(self.visual_dim + self.semantic_dim),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(
+                self.visual_dim + self.semantic_dim,
+                self.visual_dim,
+                kernel_size=4,
+                stride=2,
+                padding=1,
+                bias=False,
+            ),
+            nn.Tanh(),
+>>>>>>> f39460a156536f65f659a3ff33ff8db22da8ad31
         )
         processed_results = []
         for r, input, image_size in zip(results, batched_inputs, image_sizes):
@@ -238,6 +282,7 @@ class KDRCNN(GeneralizedRCNN):
         images = self.preprocess_image(batched_inputs)
         features = self.backbone(images.tensor)
 
+<<<<<<< HEAD
         kd_loss, features, teacher_features = self._distillate(features, gt_instances)
         features_de_rpn = features
         teacher_features_de_rpn = teacher_features
@@ -267,6 +312,18 @@ class KDRCNN(GeneralizedRCNN):
             features_de_rcnn,
             proposals,
             gt_instances,
+=======
+        self.discriminator = nn.Sequential(
+            nn.Conv2d(self.visual_dim, self.visual_dim // 2, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(self.visual_dim // 2),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(self.visual_dim // 2, self.visual_dim // 4, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(self.visual_dim // 4),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(self.visual_dim // 4, 1, 4, 1, 0, bias=False),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Sigmoid()
+>>>>>>> f39460a156536f65f659a3ff33ff8db22da8ad31
         )
 
         return kd_loss, proposal_losses, detector_losses, results, images.image_sizes
@@ -604,7 +661,11 @@ class KDGANRCNN(GeneralizedRCNN):
             }
 
         if self.student_training:
+<<<<<<< HEAD
             features = {f: self.generator(features[f]) for f in features}
+=======
+            features = {f: self.student_adapter(features[f]) for f in features}
+>>>>>>> f39460a156536f65f659a3ff33ff8db22da8ad31
             if self.distill_on and self.training:
                 teacher_features = {
                     f: self._generate_semantic_features(features[f], gt_instances)
@@ -626,7 +687,12 @@ class KDGANRCNN(GeneralizedRCNN):
                 k: self.affine_rpn(decouple_layer(features[k], scale)) for k in features
             }
         proposals, proposal_losses = self.proposal_generator(
+<<<<<<< HEAD
             images, features_de_rpn, gt_instances, real_features
+=======
+            images, features_de_rpn, gt_instances, 
+            # real_features
+>>>>>>> f39460a156536f65f659a3ff33ff8db22da8ad31
         )
 
         features_de_rcnn = features
@@ -642,12 +708,21 @@ class KDGANRCNN(GeneralizedRCNN):
 
         return adv_losses, proposal_losses, detector_losses, results, images.image_sizes
 
+<<<<<<< HEAD
     def _merge_losses(self, adv_losses, detector_losses, alpha=10):
         loss_kd = detector_losses.pop("loss_kd")
         adv_losses.update({"loss_adv_g": adv_losses["loss_adv_g"] + alpha * loss_kd})
 
         return adv_losses, detector_losses
 
+=======
+    def _forward_discriminator(self, features):
+        # print("origin", features.shape)
+        logits = self.discriminator(features)
+        # print("logits", logits.shape)
+        return logits
+    
+>>>>>>> f39460a156536f65f659a3ff33ff8db22da8ad31
     def _forward_gan(self, real_features, fake_features):
         logit_real = self.discriminator(real_features)
         logit_fake = self.discriminator(fake_features)

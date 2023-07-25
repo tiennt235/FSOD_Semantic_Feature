@@ -1011,12 +1011,17 @@ class KDRes5ROIHeads(Res5ROIHeads):
 class KDFMRes5ROIHeads(Res5ROIHeads):
     def __init__(self, cfg, input_shape):
         super().__init__(cfg, input_shape)
+<<<<<<< HEAD
 
         self.teacher_training = cfg.MODEL.ADDITION.TEACHER_TRAINING
         self.student_training = cfg.MODEL.ADDITION.STUDENT_TRAINING
         self.distill_on = cfg.MODEL.ADDITION.DISTILL_ON
         self.kd_temp = cfg.MODEL.ADDITION.KD_TEMP
             
+=======
+        self.kd_temp = cfg.MODEL.ADDITION.KD_TEMP
+        
+>>>>>>> f39460a156536f65f659a3ff33ff8db22da8ad31
     def forward(self, images, features, proposals, targets=None, real_features=None):
         """
         See :class:`ROIHeads.forward`.
@@ -1041,12 +1046,18 @@ class KDFMRes5ROIHeads(Res5ROIHeads):
 
         del feature_pooled
         
+<<<<<<< HEAD
+=======
+        # teacher_pred_class_logits = None
+        # teacher_pred_proposal_deltas = None
+>>>>>>> f39460a156536f65f659a3ff33ff8db22da8ad31
         real_pred_class_logits = None
         real_pred_proposal_deltas = None
         teacher_pred_class_logits = None
         teacher_pred_proposal_deltas = None
         
         if self.training:
+<<<<<<< HEAD
             if self.distill_on:
                 real_box_features = self._shared_roi_transform(
                     [real_features[f] for f in self.in_features], proposal_boxes
@@ -1063,6 +1074,26 @@ class KDFMRes5ROIHeads(Res5ROIHeads):
                 
                 del real_features
                 del real_feature_pooled
+=======
+            real_box_features = self._shared_roi_transform(
+                [real_features[f] for f in self.in_features], proposal_boxes
+            )
+            real_feature_pooled = real_box_features.mean(dim=[2, 3])  # pooled to 1x1
+
+            real_pred_class_logits, real_pred_proposal_deltas = self.box_predictor(
+                real_feature_pooled
+            )
+            # teacher_pred_class_logits, teacher_pred_proposal_deltas = self.box_predictor(
+            #     real_feature_pooled
+            # )
+
+            # real_pred_class_logits, real_pred_proposal_deltas = self.teacher_box_predictor(
+            #     real_feature_pooled
+            # )
+            
+            del real_features
+            del real_feature_pooled
+>>>>>>> f39460a156536f65f659a3ff33ff8db22da8ad31
         
         outputs = KDFastRCNNOutputs(
             self.box2box_transform,

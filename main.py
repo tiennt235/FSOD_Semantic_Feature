@@ -11,6 +11,7 @@ import torch
 
 
 def add_new_configs(cfg):
+<<<<<<< HEAD
     cfg.MODEL.AUX = CN()
     cfg.MODEL.AUX.NAME = None
     cfg.MODEL.AUX.INFERENCE_WITH_GT = False
@@ -19,6 +20,15 @@ def add_new_configs(cfg):
     cfg.MODEL.AUX.DISTILL_ON = False
     cfg.MODEL.AUX.DISTILL_FEATURES = None
     cfg.MODEL.AUX.KD_TEMP = 1
+=======
+    cfg.MODEL.ADDITION = CN()
+    cfg.MODEL.ADDITION.NAME = None
+    cfg.MODEL.ADDITION.INFERENCE_WITH_GT = False
+    cfg.MODEL.ADDITION.TEACHER_TRAINING = False
+    cfg.MODEL.ADDITION.STUDENT_TRAINING = False
+    cfg.MODEL.ADDITION.DISTILL_ON = False
+    cfg.MODEL.ADDITION.KD_TEMP = 1
+>>>>>>> f39460a156536f65f659a3ff33ff8db22da8ad31
     cfg.MODEL.ROI_HEADS.FREEZE_BOX_PREDICTOR = False
     
 def batch_size_based_cfg_adjustment(cfg):
@@ -27,7 +37,7 @@ def batch_size_based_cfg_adjustment(cfg):
     cfg.defrost()
     cfg.SOLVER.BASE_LR = cfg.SOLVER.BASE_LR/alpha
     cfg.SOLVER.STEPS = tuple([int(step*alpha) for step in cfg.SOLVER.STEPS])
-    cfg.SOLVER.MAX_ITER = int(cfg.SOLVER.MAX_ITER*alpha)
+    # cfg.SOLVER.MAX_ITER = int(cfg.SOLVER.MAX_ITER*alpha)
 
 def align_iter_student(cfg):
     alpha = 1
